@@ -1,4 +1,9 @@
-from scripts.report_test_failures import annotations
+from pathlib import Path
+from runpy import run_path
+
+annotations = run_path(
+    str(Path(__file__).resolve().parents[1] / "scripts/report_test_failures.py")
+)["annotations"]
 
 
 def test_ci_annotations_omit_failure_bodies_and_escape_command_injection(tmp_path):
