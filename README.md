@@ -68,7 +68,7 @@ The sandbox runs fixed stdlib `unittest` discovery against `tests/`. It installs
 python scripts/create_demo_zip.py
 ```
 
-Upload `data/fragile-python.zip`. Without a model, CodeProof removes a redundant f-string and flags the shared mutable default. With a compatible model and working sandbox, it can propose and validate a targeted correction. Model output is not guaranteed; unsuccessful proposals remain visible in the report.
+Upload `data/fragile-python.zip`. Without a model, CodeProof removes a redundant f-string and flags the shared mutable default. With a compatible model and working sandbox, it can propose and validate a targeted correction. Model output is not guaranteed; unsuccessful proposals remain visible in the report. Reports show findings up to the configured limit and disclose that coverage limit.
 
 GitHub input accepts `owner/repository` or `https://github.com/owner/repository`, fetching its public default branch without credentials. Private repositories must be provided as a ZIP. Defaults limit inputs to 20 MiB compressed, 50 MiB expanded, 2,000 files, and 512 KiB per file. Credential files, source-control internals, and common generated directories are omitted. Obvious credential literals are withheld from model transmission and the vector index; detection is heuristic.
 

@@ -114,10 +114,17 @@ def run_tests(workspace: Path, settings: Settings, deadline: float) -> dict:
         markers = re.findall(r"^CODEPROOF_TEST_RESULT=(.+)$", text, flags=re.MULTILINE)
         if markers:
             counts = json.loads(markers[-1])
-            result.update(
-                {key: int(counts[key]) for key in ("tests", "failures", "errors", "skipped")}
+            keys = ("tests", "failures", "errors", "skipped")
+            if not isinstance(counts, dict) or any(
+                type(counts.get(key)) is not int or counts[key] < 0 for key in keys
+            ):
+                raise ValueError("Invalid test counts")
+            result.update({key: counts[key] for key in keys})
+            result["passed"] = (
+                returncode == 0
+                and result["tests"] > result["skipped"]
+                and result["failures"] == result["errors"] == 0
             )
-            result["passed"] = returncode == 0 and result["tests"] > result["skipped"]
         elif returncode == 0:
             result["details"] = "Sandbox did not return a test-count verification marker"
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):

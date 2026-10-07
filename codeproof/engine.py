@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import ast
 import difflib
+import os
 import re
+import stat
+import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -36,6 +39,47 @@ from codeproof.sandbox import run_tests
 class ReviewState(TypedDict, total=False):
     route: str
     report: dict
+
+
+def _atomic_write(workspace: Path, relative: str, content: bytes, maximum: int) -> None:
+    """Replace source only after a complete temporary write, retaining its original mode."""
+    if len(content) > maximum:
+        raise AnalysisError("Atomic source replacement exceeds the configured byte limit")
+    path = safe_path(workspace, relative)
+    mode = stat.S_IMODE(path.stat().st_mode)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".codeproof-", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.chmod(mode)
+        # Revalidate the path immediately before replacement; never follow linked source paths.
+        if safe_path(workspace, relative) != path:
+            raise AnalysisError("Source path changed before atomic replacement")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _git_lines(content: bytes) -> list[str]:
+    """Git line records end only at LF; Unicode separators and CR are source content."""
+    text = content.decode("utf-8", errors="replace")
+    parts = text.split("\n")
+    return [part + "\n" for part in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
+
+
+def _file_patch(relative: str, before: bytes, after: bytes) -> str:
+    records = difflib.unified_diff(
+        _git_lines(before), _git_lines(after), fromfile=f"a/{relative}", tofile=f"b/{relative}"
+    )
+    return "".join(
+        record if record.endswith("\n") else record + "\n\\ No newline at end of file\n"
+        for record in records
+    )
 
 
 def _is_test_path(path: str) -> bool:
@@ -321,7 +365,9 @@ class _Review:
                 candidate_files[relative] = self.candidate
                 if syntax_errors(candidate_files):
                     raise AnalysisError("Candidate introduces invalid Python syntax")
-                path.write_bytes(self.candidate)
+                _atomic_write(
+                    self.workspace, relative, self.candidate, self.settings.max_file_bytes
+                )
                 wrote = True
                 lint = ruff_check(self.workspace, candidate_files, self.settings, self.deadline)
                 candidate_diagnostics = lint + ast_findings(candidate_files)
@@ -367,7 +413,7 @@ class _Review:
         finally:
             if wrote and not accepted:
                 # Always restore rejected bytes, including timeout or exceptions from validation.
-                safe_path(self.workspace, relative).write_bytes(source)
+                _atomic_write(self.workspace, relative, source, self.settings.max_file_bytes)
         if not accepted:
             self.rejected += 1
             if not validation["passed"]:
@@ -422,10 +468,10 @@ class _Review:
         )
         accepted = sum(action["accepted"] for action in self.actions)
         for finding in self.findings:
-            if finding["status"] == "pending":
-                finding["status"] = "not_attempted" if self.stop_reason else "needs_review"
-            elif issue_count(self.diagnostics, finding) == 0:
+            if issue_count(self.diagnostics, finding) == 0:
                 finding["status"] = "resolved"
+            elif finding["status"] == "pending":
+                finding["status"] = "not_attempted" if self.stop_reason else "needs_review"
         unresolved = sum(finding["status"] != "resolved" for finding in self.findings)
         status = "improved" if accepted else "stopped" if self.stop_reason else "reviewed"
         if accepted:
@@ -437,18 +483,7 @@ class _Review:
         patch = ""
         for relative in self.original:
             if self.original[relative] != self.current.get(relative):
-                patch += "".join(
-                    difflib.unified_diff(
-                        self.original[relative]
-                        .decode("utf-8", errors="replace")
-                        .splitlines(keepends=True),
-                        self.current[relative]
-                        .decode("utf-8", errors="replace")
-                        .splitlines(keepends=True),
-                        fromfile=f"a/{relative}",
-                        tofile=f"b/{relative}",
-                    )
-                )
+                patch += _file_patch(relative, self.original[relative], self.current[relative])
         reason = self.stop_reason or (
             "Completed bounded review; unresolved findings require review"
             if unresolved

@@ -74,6 +74,7 @@ def create_app(config: Settings = settings, store=None, start_worker: bool = Tru
                 app.state.store.recover_interrupted()
                 thread = Thread(target=work, args=(app.state.store, config, stop), daemon=True)
                 thread.start()
+            app.state.worker_thread = thread
             config.data_dir.mkdir(parents=True, exist_ok=True)
             yield
         finally:
@@ -130,10 +131,15 @@ def create_app(config: Settings = settings, store=None, start_worker: bool = Tru
 
     @app.get("/api/health")
     def health(request: Request):
+        if start_worker and not request.app.state.worker_thread.is_alive():
+            raise HTTPException(
+                503, "Review worker stopped; restart after checking service configuration"
+            )
         # A DB query makes this readiness evidence, not merely an HTTP liveness check.
         request.app.state.store.list_runs(1)
         return {
             "database": "ready",
+            "worker": "ready" if start_worker else "disabled",
             "provider_configured": bool(config.llm_model and config.llm_api_key),
             "sandbox_enabled": config.sandbox_enabled,
             "max_upload_bytes": config.max_upload_bytes,
@@ -147,6 +153,10 @@ def create_app(config: Settings = settings, store=None, start_worker: bool = Tru
     ):
         from codeproof.ingestion import IngestionError, ingest_github, ingest_zip
 
+        if start_worker and not request.app.state.worker_thread.is_alive():
+            raise HTTPException(
+                503, "Review worker stopped; restart before submitting another review"
+            )
         repository = (repository or "").strip()
         if bool(repository) == bool(file):
             raise HTTPException(422, "Provide exactly one public GitHub repository or ZIP file")
@@ -210,7 +220,16 @@ def create_app(config: Settings = settings, store=None, start_worker: bool = Tru
 
     @app.get("/api/runs/{run_id}")
     def detail(request: Request, run_id: str):
-        return public_run(lookup(request, run_id))
+        run = lookup(request, run_id)
+        if (
+            start_worker
+            and run["status"] in {"queued", "running"}
+            and not request.app.state.worker_thread.is_alive()
+        ):
+            raise HTTPException(
+                503, "Review worker stopped; restart the app to recover interrupted reviews"
+            )
+        return public_run(run)
 
     @app.get("/api/runs/{run_id}/report")
     def report_download(request: Request, run_id: str, format: str = "markdown"):

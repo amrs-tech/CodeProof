@@ -1,13 +1,17 @@
 import json
 import os
+import stat
+import subprocess
+import time
 
 import pytest
 
 from codeproof.analyzer import AnalysisError, digest, safe_path
 from codeproof.config import Settings
-from codeproof.engine import _guard_candidate, run_review
+from codeproof.engine import _atomic_write, _guard_candidate, run_review
 from codeproof.errors import RunAborted
 from codeproof.llm import EditProvider, Proposal, ProposalError
+from codeproof.sandbox import run_tests
 
 FRAGILE = b"def append_item(item, items=[]):\n    items.append(item)\n    return items\n"
 FIXED = (
@@ -50,6 +54,89 @@ def test_real_safe_fix_returns_patch_and_honest_validation(tmp_path):
     assert not any(item["kind"] == "sandbox_tests" for item in report["validation"])
     assert any("do not prove behavioral" in text for text in report["limitations"])
     json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    ("name", "source"),
+    [
+        ("app.py", b"def greeting():\n    return f'hello'"),
+        ("app.py", b"value = 1"),
+        ("source with spaces.py", b"def greeting():\r\n    return f'hello'"),
+        ("caf\u00e9.py", "message = f'hello\u2028world'\n".encode()),
+        ("app.py", b"message = f'hello\x0cworld'\n"),
+    ],
+)
+def test_report_patch_applies_to_exact_original_bytes(tmp_path, name, source):
+    original = tmp_path / "original"
+    reviewed = tmp_path / "reviewed"
+    original.mkdir()
+    reviewed.mkdir()
+    (original / name).write_bytes(source)
+    (reviewed / name).write_bytes(source)
+    report = run_review(reviewed, Settings(_env_file=None))
+    assert report["status"] == "improved", report
+    patch_file = tmp_path / "accepted.patch"
+    patch_file.write_bytes(report["patch"].encode("utf-8"))
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.autocrlf=false",
+            "apply",
+            "--check",
+            "--whitespace=nowarn",
+            str(patch_file),
+        ],
+        cwd=original,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-c", "core.autocrlf=false", "apply", "--whitespace=nowarn", str(patch_file)],
+        cwd=original,
+        capture_output=True,
+        check=True,
+    )
+    assert (original / name).read_bytes() == (reviewed / name).read_bytes()
+    if not source.endswith(b"\n"):
+        assert "\\ No newline at end of file\n" in report["patch"]
+
+
+def test_atomic_replace_failure_preserves_original_and_removes_temporary_file(
+    tmp_path, monkeypatch
+):
+    source_repo(tmp_path)
+
+    def failed_replace(*_args):
+        raise OSError("Replacement failed")
+
+    monkeypatch.setattr("codeproof.engine.os.replace", failed_replace)
+    with pytest.raises(OSError, match="Replacement failed"):
+        _atomic_write(tmp_path, "app.py", FIXED, 1024)
+    assert (tmp_path / "app.py").read_bytes() == FRAGILE
+    assert not list(tmp_path.glob(".codeproof-*.tmp"))
+
+
+def test_atomic_temporary_write_failure_never_truncates_original(tmp_path, monkeypatch):
+    source_repo(tmp_path)
+
+    def failed_sync(*_args):
+        raise OSError("Storage is full")
+
+    monkeypatch.setattr("codeproof.engine.os.fsync", failed_sync)
+    with pytest.raises(OSError, match="Storage is full"):
+        _atomic_write(tmp_path, "app.py", FIXED, 1024)
+    assert (tmp_path / "app.py").read_bytes() == FRAGILE
+    assert not list(tmp_path.glob(".codeproof-*.tmp"))
+
+
+def test_atomic_replacement_preserves_source_permissions(tmp_path):
+    source_repo(tmp_path)
+    (tmp_path / "app.py").chmod(0o644)
+    original_mode = stat.S_IMODE((tmp_path / "app.py").stat().st_mode)
+    _atomic_write(tmp_path, "app.py", FIXED, 1024)
+    assert (tmp_path / "app.py").read_bytes() == FIXED
+    assert stat.S_IMODE((tmp_path / "app.py").stat().st_mode) == original_mode
 
 
 def test_successful_model_fix_requires_baseline_and_candidate_tests(tmp_path, monkeypatch):
@@ -179,6 +266,14 @@ def test_invalid_baseline_is_stopped_without_writing(tmp_path):
     assert report["status"] == "stopped"
     assert report["metrics"]["attempts"] == 0
     assert report["validation"][0]["passed"] is False
+
+
+def test_budget_stop_reports_all_occurrences_resolved_by_one_fix(tmp_path):
+    source_repo(tmp_path, b'value = f"hello"\nother = f"world"\n')
+    report = run_review(tmp_path, Settings(_env_file=None, max_total_attempts=1))
+    assert report["metrics"]["attempts"] == 1
+    assert len(report["findings"]) == 2
+    assert all(finding["status"] == "resolved" for finding in report["findings"])
 
 
 @pytest.mark.parametrize(
@@ -327,6 +422,38 @@ def test_real_docker_accepts_substantive_fix_after_baseline_and_candidate(
     test_results = [entry for entry in report["validation"] if entry["kind"] == "sandbox_tests"]
     assert [entry["phase"] for entry in test_results] == ["baseline", "candidate"]
     assert all(entry["passed"] and entry["tests"] == 1 for entry in test_results)
+    # Add a trusted regression AFTER admission, then prove the actual default-sharing bug.
+    regression = docker_behavior_repo / "tests" / "test_independent_defaults.py"
+    regression.write_text(
+        "import unittest\nfrom app import append_item\n\n"
+        "class IndependentDefaultTests(unittest.TestCase):\n"
+        "    def test_each_default_call_has_its_own_list(self):\n"
+        "        first = append_item(1)\n"
+        "        second = append_item(2)\n"
+        "        self.assertEqual(first, [1])\n"
+        "        self.assertEqual(second, [2])\n"
+        "        self.assertIsNot(first, second)\n",
+        encoding="utf-8",
+    )
+    regression.chmod(0o644)
+    accepted_source = (docker_behavior_repo / "app.py").read_bytes()
+    try:
+        improved_regression = run_tests(
+            docker_behavior_repo, docker_config(), time.monotonic() + 30
+        )
+        assert improved_regression["passed"] and improved_regression["tests"] == 2, (
+            improved_regression
+        )
+        (docker_behavior_repo / "app.py").write_bytes(FRAGILE)
+        original_regression = run_tests(
+            docker_behavior_repo, docker_config(), time.monotonic() + 30
+        )
+        assert not original_regression["passed"] and original_regression["failures"] == 1, (
+            original_regression
+        )
+    finally:
+        (docker_behavior_repo / "app.py").write_bytes(accepted_source)
+    assert (docker_behavior_repo / "app.py").read_bytes() == FIXED
 
 
 @pytest.mark.sandbox

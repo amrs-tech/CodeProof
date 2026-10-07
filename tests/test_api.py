@@ -150,3 +150,24 @@ def test_report_and_patch_downloads(client):
     assert http.get(f"/api/runs/{run_id}/report?format=json").json()["status"] == "improved"
     assert http.get(f"/api/runs/{run_id}/report?format=exe").status_code == 422
     assert http.get("/api/runs/not-a-run").status_code == 404
+
+
+def test_stopped_worker_fails_readiness_and_rejects_new_jobs(tmp_path, monkeypatch):
+    class WorkerStore(MemoryStore):
+        def acquire_worker_lock(self):
+            return True
+
+        def recover_interrupted(self):
+            pass
+
+    monkeypatch.setattr("codeproof.app.work", lambda *_args: None)
+    store = WorkerStore()
+    with TestClient(create_app(Settings(data_dir=tmp_path), store)) as http:
+        assert http.get("/api/health").status_code == 503
+        assert http.post("/api/runs", files={"file": ("demo.zip", zip_bytes())}).status_code == 503
+        assert not store.runs
+        run_id = str(uuid4())
+        store.runs[run_id] = {"id": run_id, "status": "running"}
+        assert http.get(f"/api/runs/{run_id}").status_code == 503
+        store.runs[run_id]["status"] = "reviewed"
+        assert http.get(f"/api/runs/{run_id}").status_code == 200

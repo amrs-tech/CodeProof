@@ -24,7 +24,7 @@ The repository began with one README and no application. This update implements 
 
 ## Local verification evidence
 
-- Full suite: **127 passed, 4 skipped**, with **89% application statement coverage**.
+- Final local suite: **143 passed, 4 skipped**, with **89% application statement coverage**.
 - Actual PostgreSQL 15 with pgvector 0.8.2: extension initialization, vector retrieval, run isolation, queue capacity, concurrent job claims, worker ownership, and persisted reports verified.
 - End-to-end API: a submitted ZIP produced an accepted deterministic change, persisted its report, and served both report and patch downloads.
 - Browser demonstration: `fragile-python.zip` produced one statically validated improvement and retained the mutable-default finding as unresolved. The interface showed the actual evidence and limitations; patch download completed successfully.
@@ -32,7 +32,9 @@ The repository began with one README and no application. This update implements 
 - Ruff lint, Ruff formatting, JavaScript syntax, dependency consistency, and Git whitespace validation passed.
 - Guardrail coverage includes traversal/link/collision/bomb archives, credential exclusion, unsafe provider URLs, malformed schemas, stale hashes, prompt-injection-like input, rollback, duplicated proposals, retry ceilings, malformed HTTP headers, and control-plane aborts.
 
-The four skipped checks require actual Docker execution: substantive model-edit acceptance, behavioral regression rollback, runtime isolation controls, and hanging-test timeout/cleanup. Docker is not installed on this Windows host. GitHub Actions builds the sandbox and enables these tests with a real PostgreSQL/pgvector service; its result must be recorded after the push.
+The four locally skipped checks require actual Docker execution: substantive model-edit acceptance, behavioral regression rollback, runtime isolation controls, and hanging-test timeout/cleanup. Docker is not installed on this Windows host. [GitHub Actions verified the first implementation commit](https://github.com/amrs-tech/CodeProof/actions/runs/37635542801) successfully with these tests enabled, a real PostgreSQL/pgvector service, and successful sandbox/application image builds.
+
+The final audit also hardens stopped-worker readiness/submission/polling behavior, applicable patches for unterminated source lines and unusual line characters, and atomic candidate publication/rollback. Tests reproduce exact bytes when applying generated patches with Git and cover failed temporary writes, mode preservation, resolved-finding status at the attempt limit, and invalid sandbox count metadata. A trusted Docker regression test demonstrates that separate default calls no longer share a mutable list and confirms that the original source fails that check. The current workflow status is available in [repository verification runs](https://github.com/amrs-tech/CodeProof/actions/workflows/verify.yml).
 
 ## Practical limits
 

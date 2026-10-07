@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import subprocess
 import time
@@ -102,6 +103,34 @@ def test_timeout_kills_client_and_removes_container(tmp_path, monkeypatch):
     assert not result["passed"]
     assert events == ["killed", "removed"]
     assert "bounded execution" in result["details"]
+
+
+@pytest.mark.parametrize(
+    "counts",
+    [
+        {"tests": 2, "failures": 1, "errors": 0, "skipped": 0},
+        {"tests": 2, "failures": 0, "errors": 1, "skipped": 0},
+        {"tests": 2, "failures": 0, "errors": 0, "skipped": -1},
+        {"tests": True, "failures": 0, "errors": 0, "skipped": 0},
+        {"tests": "2", "failures": 0, "errors": 0, "skipped": 0},
+        {"tests": 2, "failures": 0, "errors": 0, "skipped": 2},
+    ],
+)
+def test_invalid_or_failed_sandbox_counts_cannot_pass(tmp_path, monkeypatch, counts):
+    (tmp_path / "tests").mkdir()
+
+    class Process:
+        stdout = io.BytesIO(("CODEPROOF_TEST_RESULT=" + json.dumps(counts) + "\n").encode())
+
+        def wait(self, timeout):
+            return 0
+
+    monkeypatch.setattr("codeproof.sandbox.subprocess.Popen", lambda *_a, **_k: Process())
+    monkeypatch.setattr("codeproof.sandbox.subprocess.run", lambda *_a, **_k: None)
+    result = run_tests(
+        tmp_path, Settings(_env_file=None, sandbox_enabled=True), time.monotonic() + 10
+    )
+    assert not result["passed"]
 
 
 @pytest.mark.sandbox
