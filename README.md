@@ -34,6 +34,7 @@ Static review and conservative fixes work without an API key. Set provider crede
 | Setting | Default / purpose |
 | --- | --- |
 | `CODEPROOF_LLM_PROVIDER` | `auto`: Gemini when both its key and model are configured, otherwise OpenAI-compatible. Set `openai` or `gemini` to choose explicitly. |
+| `CODEPROOF_LLM_FALLBACK_ENABLED` | `true`: in automatic environment selection, permit one Gemini-to-OpenAI fallback when both providers are configured. Set `false` to disable it. |
 | `CODEPROOF_LLM_API_KEY` | OpenAI-compatible API key; blank disables this provider. |
 | `CODEPROOF_LLM_MODEL` | `gpt-6-luna`; a legacy blank value also resolves to this default. |
 | `CODEPROOF_LLM_REASONING_EFFORT` | `medium`; applied to supported OpenAI reasoning models, omitted for other compatible models. |
@@ -44,9 +45,15 @@ Static review and conservative fixes work without an API key. Set provider crede
 
 The UI's optional **Model settings** let you choose a provider, override its model, and enter your own key for one review (BYOK). An empty key uses only that selected provider's environment key. OpenAI defaults to medium reasoning; Gemini uses its model's native thinking settings. Browser users cannot override server endpoint URLs. The CodeProof access token is separate from a model API key.
 
-Run-only keys stay in server memory until the worker consumes them, and are released after completion or failure. They are never saved in PostgreSQL, reports, source files, browser storage, or application logs. The input clears immediately on submission. Queued BYOK reviews lose their key on server restart and fail with a request to resubmit, instead of silently using an environment key. A report records only provider, model, applicable effort, and credential source.
+Run-only keys stay in server memory until the worker consumes them, and are released after completion or failure. They are never saved in PostgreSQL, reports, source files, browser storage, or application logs. The input clears immediately on submission. Queued BYOK reviews lose their key on server restart and fail with a request to resubmit, instead of silently using an environment key. Reports record requested and actual provider/model, applicable effort, credential source, shared provider-call counts, and sanitized fallback history.
 
-Gemini Live/audio models do not support the structured code-edit responses required here and are rejected before review submission. Quota/rate-limit errors receive at most two transport attempts per proposal, also counted against the overall call budget. There is no automatic switch to Live or another provider: choose another configured provider for a new review. See [Google's Live model documentation](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live) and [OpenAI's GPT-6 Luna documentation](https://developers.openai.com/api/docs/models/gpt-6-luna).
+Gemini Live/audio models do not support the structured code-edit responses required here and are rejected before review submission. See [Google's Live model documentation](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live) and [OpenAI's GPT-6 Luna documentation](https://developers.openai.com/api/docs/models/gpt-6-luna).
+
+With automatic environment selection, Gemini runs first and configured OpenAI is the backup. After bounded transport retries, availability failures can trigger one switch: authentication/model availability (HTTP 401/403/404), quota or rate limits (429), service errors (5xx), network failures, or timeouts. The review then stays on OpenAI. All failed and backup requests share the same provider-call budget and review deadline; switching cannot restart either budget. Malformed/refused/unsafe responses, failed edit guards, exhausted budgets, and elapsed deadlines do not trigger fallback.
+
+Output allowances scale with source size: at least 4096 tokens for Gemini and 1024 for OpenAI-compatible requests, capped at 16000. The Gemini floor reserves room for native thinking and a complete structured source replacement while retaining provider-default thinking settings.
+
+Explicit provider selections, per-run model overrides, and BYOK reviews stay pinned to their chosen provider. Their errors stop the proposal within the existing limits. Automatic fallback uses only the already configured server environment credentials and never switches to a Live/audio model. Reports explain the initial request, actual provider/model, fixed fallback reason, and shared call count.
 
 The Compose app has no Docker daemon access. For substantive remediation with behavioral checks, run the app natively with a local Docker sandbox.
 
@@ -93,7 +100,7 @@ GitHub input accepts `owner/repository` or `https://github.com/owner/repository`
 
 ## Reports and API
 
-The UI presents findings, attempts, accepted/rejected edits, rationale, progress, validation evidence, stop reasons, limitations, and recent runs. Download a presentable standalone HTML report, Markdown, JSON, or a unified diff. HTML includes readable findings and rationale, validation evidence, provider metadata, accepted changes, and print styling; it opens offline without scripts or external assets. Repository/model text is escaped before inclusion.
+The UI presents findings, attempts, accepted/rejected edits, rationale, progress, validation evidence, stop reasons, limitations, and recent runs. Download a presentable standalone HTML report, Markdown, JSON, or a unified diff. HTML and Markdown show requested and actual providers/models, sanitized fallback reasons/history and shared provider-call counts alongside the review evidence. HTML includes readable findings and rationale, validation evidence, accepted changes, and print styling; it opens offline without scripts or external assets. Repository/model text is escaped before inclusion.
 
 | Endpoint | Purpose |
 | --- | --- |

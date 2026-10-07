@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     command_timeout: int = Field(default=30, ge=1, le=120)
     llm_base_url: str = "https://api.openai.com/v1"
     llm_provider: Literal["auto", "openai", "gemini"] = "auto"
+    llm_fallback_enabled: bool = True
     llm_api_key: str = Field(default="", repr=False)
     llm_model: str = "gpt-6-luna"
     llm_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "medium"

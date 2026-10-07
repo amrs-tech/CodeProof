@@ -299,3 +299,77 @@ def test_markdown_provider_configuration_cannot_inject_markup(run):
     assert "<script>" not in configuration
     assert "&lt;script&gt;" in configuration
     assert "\\[click\\]\\(javascript:alert\\(1\\)\\)" in configuration
+
+
+def test_fallback_reports_actual_provider_and_initial_request_separately(run):
+    run["source"]["provider"] = {
+        "provider": "gemini",
+        "model": "primary-text-model",
+        "credential_source": "environment",
+    }
+    run["report"]["provider"] = {
+        "provider": "openai",
+        "model": "backup-text-model",
+        "reasoning_effort": "medium",
+        "requested_provider": "gemini",
+        "requested_model": "primary-text-model",
+        "actual_provider": "openai",
+        "actual_model": "backup-text-model",
+        "fallback_reason": "rate_limit_or_quota",
+        "provider_calls": 4,
+        "fallback_history": [
+            {
+                "from_provider": "gemini",
+                "from_model": "primary-text-model",
+                "to_provider": "openai",
+                "to_model": "backup-text-model",
+                "reason": "rate_limit_or_quota",
+                "provider_calls": 2,
+            }
+        ],
+    }
+    document = html_report(run)
+    assert "<dt>Review provider</dt><dd>openai</dd>" in document
+    assert "<dt>Model</dt><dd>backup-text-model</dd>" in document
+    assert "<dt>Requested provider</dt><dd>gemini</dd>" in document
+    assert "<dt>Requested model</dt><dd>primary-text-model</dd>" in document
+    assert "<dt>Provider calls</dt><dd>4</dd>" in document
+    assert "gemini / primary-text-model → openai / backup-text-model" in document
+    assert "The primary provider reached a rate limit or quota limit." in document
+    assert "Shared provider calls at transition: 2." in document
+    markdown = markdown_report(run)
+    assert "Review provider: openai" in markdown
+    assert "Requested provider: gemini" in markdown
+    assert "## Provider fallback history" in markdown
+    assert "primary-text-model → openai / backup-text-model" in markdown
+    assert "Shared provider calls at transition: 2." in markdown
+
+
+def test_fallback_report_escapes_models_and_does_not_render_unrecognized_reasons(run):
+    hostile = '<script>alert(1)</script>"'
+    run["report"]["provider"] = {
+        "provider": "openai",
+        "model": hostile,
+        "requested_provider": hostile,
+        "requested_model": hostile,
+        "fallback_reason": hostile,
+        "fallback_history": [
+            {
+                "from_provider": hostile,
+                "from_model": hostile,
+                "to_provider": hostile,
+                "to_model": hostile,
+                "reason": hostile,
+            }
+        ],
+    }
+    document = html_report(run)
+    parser = ReportParser()
+    parser.feed(document)
+    assert "script" not in parser.tags
+    assert "Provider availability failure; no recognized reason was recorded." in document
+    assert "&lt;script&gt;" in document
+    markdown = markdown_report(run)
+    configuration = markdown.split("## Review configuration", 1)[1].split("## Outcome", 1)[0]
+    assert "<script>" not in configuration
+    assert "&lt;script&gt;" in configuration

@@ -10,6 +10,7 @@ def isolated_provider_environment(monkeypatch):
     monkeypatch.setitem(Settings.model_config, "env_file", None)
     for field in (
         "LLM_PROVIDER",
+        "LLM_FALLBACK_ENABLED",
         "LLM_API_KEY",
         "LLM_MODEL",
         "LLM_REASONING_EFFORT",

@@ -23,13 +23,18 @@ jobs:
       CODEPROOF_TEST_DATABASE_URL: postgresql://codeproof:codeproof@localhost:5432/codeproof_test
       CODEPROOF_TEST_SANDBOX: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.lock && pip install --no-deps -e .
       - run: docker build -f Dockerfile.sandbox -t codeproof-sandbox:local .
       - run: ruff check . && ruff format --check .
-      - run: pytest --cov=codeproof --cov-report=term-missing
+      - run: pytest --cov=codeproof --cov-report=term-missing --junitxml=.test-artifacts/ci-results.xml
+      - name: Publish failing test names
+        if: always()
+        run: python scripts/report_test_failures.py .test-artifacts/ci-results.xml
       - run: docker build -t codeproof-app:ci .

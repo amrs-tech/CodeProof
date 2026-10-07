@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -17,6 +18,14 @@ from codeproof.config import Settings
 
 class ProposalError(RuntimeError):
     """An edit proposal failed a provider or data boundary."""
+
+
+class ProviderAvailabilityError(ProposalError):
+    """Only fixed, categorized availability failures can activate an approved backup."""
+
+    def __init__(self, message: str, reason: str):
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -131,9 +140,15 @@ class EditProvider:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.calls = 0
+        self._active_provider: str | None = None
+        self._requested_provider = self.provider
+        self._requested_model = self.model
+        self._fallback_history: list[dict] = []
 
     @property
     def provider(self) -> str:
+        if self._active_provider is not None:
+            return self._active_provider
         selected = getattr(self.settings, "llm_provider", "auto")
         if selected == "auto":
             return (
@@ -159,14 +174,27 @@ class EditProvider:
     @property
     def public_metadata(self) -> dict:
         """Safe audit metadata; API keys and service URLs are never part of the report."""
-        return {
+        metadata = {
             "provider": self.provider,
             "model": self.model,
             "reasoning_effort": self._reasoning_effort() if self.provider == "openai" else None,
         }
+        if self._fallback_history:
+            metadata.update(
+                {
+                    "requested_provider": self._requested_provider,
+                    "requested_model": self._requested_model,
+                    "actual_provider": self.provider,
+                    "actual_model": self.model,
+                    "fallback_reason": self._fallback_history[0]["reason"],
+                    "provider_calls": self.calls,
+                    "fallback_history": [dict(event) for event in self._fallback_history],
+                }
+            )
+        return metadata
 
-    def _reasoning_effort(self) -> str | None:
-        reasoning_model = re.match(r"^(?:gpt-[56](?:[.-]|$)|o[134](?:[-.]|$))", self.model)
+    def _reasoning_effort(self, model: str | None = None) -> str | None:
+        reasoning_model = re.match(r"^(?:gpt-[56](?:[.-]|$)|o[134](?:[-.]|$))", model or self.model)
         effort = getattr(self.settings, "llm_reasoning_effort", "medium")
         if not reasoning_model or not effort or effort == "auto":
             return None
@@ -183,9 +211,28 @@ class EditProvider:
         )
         return bool(key and self.model and self.settings.llm_max_calls > 0)
 
-    def _request(self, encoded: str, source_text: str) -> tuple[str, dict, dict]:
+    def _fallback_allowed(self) -> bool:
+        return bool(
+            self.provider == "gemini"
+            and not self._fallback_history
+            and getattr(self.settings, "llm_fallback_enabled", False)
+            and self.settings.llm_api_key
+            and self.settings.llm_model
+        )
+
+    def _request(
+        self, encoded: str, source_text: str, provider: str | None = None
+    ) -> tuple[str, dict, dict]:
         settings = self.settings
-        provider = self.provider
+        provider = provider or self.provider
+        chosen_model = (
+            getattr(settings, "gemini_model", "") if provider == "gemini" else settings.llm_model
+        )
+        known_keys = tuple(
+            key for key in (settings.llm_api_key, getattr(settings, "gemini_api_key", "")) if key
+        )
+        if contains_credentials(chosen_model) or any(key in chosen_model for key in known_keys):
+            raise ProposalError("Provider model must be an identifier, not a credential")
         base = (
             getattr(settings, "gemini_base_url", "https://generativelanguage.googleapis.com/v1beta")
             if provider == "gemini"
@@ -203,9 +250,10 @@ class EditProvider:
             or url.fragment
         ):
             raise ProposalError("Provider URL must be HTTPS, or loopback HTTP, without credentials")
-        output_tokens = min(16000, max(1024, len(source_text) * 2))
+        minimum_tokens = 4096 if provider == "gemini" else 1024
+        output_tokens = min(16000, max(minimum_tokens, len(source_text) * 2))
         if provider == "gemini":
-            model = self.model.removeprefix("models/")
+            model = chosen_model.removeprefix("models/")
             if not re.fullmatch(r"gemini-[A-Za-z0-9][A-Za-z0-9._-]{0,120}", model):
                 raise ProposalError("Gemini model must be a valid text-generation model name")
             if any(
@@ -219,7 +267,6 @@ class EditProvider:
                 "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
                 "contents": [{"role": "user", "parts": [{"text": encoded}]}],
                 "generationConfig": {
-                    "candidateCount": 1,
                     "maxOutputTokens": output_tokens,
                     "responseFormat": {"text": {"mimeType": "APPLICATION_JSON", "schema": SCHEMA}},
                 },
@@ -230,7 +277,7 @@ class EditProvider:
                 body,
             )
         body = {
-            "model": self.model,
+            "model": chosen_model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": encoded},
@@ -241,7 +288,7 @@ class EditProvider:
             },
             "max_completion_tokens": output_tokens,
         }
-        effort = self._reasoning_effort()
+        effort = self._reasoning_effort(chosen_model)
         if effort is not None:
             body["reasoning_effort"] = effort
         return (
@@ -306,6 +353,86 @@ class EditProvider:
             raise ProposalError("Provider returned empty or non-text structured content")
         return text
 
+    def _delay_retry(self, deadline: float, retry_after: str | None) -> None:
+        """One modest wait consumes the existing run deadline and never resets budgets."""
+        if self.calls >= self.settings.llm_max_calls:
+            raise ProposalError("Provider call budget exhausted before retry")
+        delay = 1.0
+        if retry_after is not None:
+            try:
+                seconds = float(retry_after)
+            except ValueError:
+                seconds = -1.0
+            if math.isfinite(seconds) and seconds >= 0:
+                delay = min(seconds, 2.0)
+        if deadline - time.monotonic() <= delay:
+            raise ProposalError("Run time limit reached before provider retry")
+        time.sleep(delay)
+
+    def _send_request(self, request: tuple[str, dict, dict], deadline: float) -> object:
+        endpoint, headers, body = request
+        settings = self.settings
+        for retry in range(2):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ProposalError("Run time limit reached before provider call")
+            if self.calls >= settings.llm_max_calls:
+                raise ProposalError("Provider call budget exhausted")
+            self.calls += 1
+            try:
+                with httpx.Client(
+                    timeout=min(settings.llm_timeout, remaining),
+                    trust_env=False,
+                    follow_redirects=False,
+                ) as client:
+                    with client.stream("POST", endpoint, headers=headers, json=body) as response:
+                        status = response.status_code
+                        if status == 429 or status >= 500:
+                            if retry == 0:
+                                response.close()
+                                self._delay_retry(deadline, response.headers.get("Retry-After"))
+                                continue
+                            if status == 429:
+                                raise ProviderAvailabilityError(
+                                    "Provider rate limit or quota exceeded after two bounded attempts",
+                                    "rate_limit_or_quota",
+                                )
+                            raise ProviderAvailabilityError(
+                                "Provider unavailable after two bounded attempts",
+                                "service_unavailable",
+                            )
+                        if status in {401, 403, 404}:
+                            raise ProviderAvailabilityError(
+                                f"Provider configuration unavailable (HTTP {status})",
+                                "model_unavailable"
+                                if status == 404
+                                else "authentication_unavailable",
+                            )
+                        if status != 200:
+                            raise ProposalError(f"Provider rejected request (HTTP {status})")
+                        chunks = bytearray()
+                        for chunk in response.iter_bytes():
+                            chunks.extend(chunk)
+                            if len(chunks) > settings.max_file_bytes * 3 + 16000:
+                                raise ProposalError("Provider response exceeds size limit")
+                            if time.monotonic() >= deadline:
+                                raise ProposalError(
+                                    "Run time limit reached during provider response"
+                                )
+                return json.loads(chunks)
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as error:
+                if retry == 0:
+                    continue
+                raise ProviderAvailabilityError(
+                    "Provider failed after two bounded attempts",
+                    "timeout" if isinstance(error, httpx.TimeoutException) else "network_failure",
+                ) from None
+            except (KeyError, IndexError, TypeError, ValueError):
+                raise ProposalError("Provider returned malformed structured content") from None
+            except httpx.HTTPError:
+                raise ProposalError("Provider request failed") from None
+        raise ProposalError("Provider retry limit reached")
+
     def propose(
         self, finding: dict, source: bytes, context: list[dict], feedback: str, deadline: float
     ) -> Proposal:
@@ -346,48 +473,12 @@ class EditProvider:
             encoded = json.dumps(payload, ensure_ascii=False)
         if len(encoded) + len(SYSTEM_PROMPT) > settings.llm_max_input_chars:
             raise ProposalError("Source exceeds model prompt budget")
-        endpoint, headers, body = self._request(encoded, text)
-        for retry in range(2):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ProposalError("Run time limit reached before provider call")
-            if self.calls >= settings.llm_max_calls:
-                raise ProposalError("Provider call budget exhausted")
-            self.calls += 1
+        request = self._request(encoded, text)
+        # Validate the approved backup endpoint before transmitting source to either provider.
+        backup = self._request(encoded, text, "openai") if self._fallback_allowed() else None
+        for transition in range(2):
             try:
-                with httpx.Client(
-                    timeout=min(settings.llm_timeout, remaining),
-                    trust_env=False,
-                    follow_redirects=False,
-                ) as client:
-                    with client.stream(
-                        "POST",
-                        endpoint,
-                        headers=headers,
-                        json=body,
-                    ) as response:
-                        if response.status_code == 429 or response.status_code >= 500:
-                            if retry == 0:
-                                continue
-                            if response.status_code == 429:
-                                raise ProposalError(
-                                    "Provider rate limit or quota exceeded after two bounded attempts"
-                                )
-                            raise ProposalError("Provider unavailable after two bounded attempts")
-                        if response.status_code != 200:
-                            raise ProposalError(
-                                f"Provider rejected request (HTTP {response.status_code})"
-                            )
-                        chunks = bytearray()
-                        for chunk in response.iter_bytes():
-                            chunks.extend(chunk)
-                            if len(chunks) > settings.max_file_bytes * 3 + 16000:
-                                raise ProposalError("Provider response exceeds size limit")
-                            if time.monotonic() >= deadline:
-                                raise ProposalError(
-                                    "Run time limit reached during provider response"
-                                )
-                result = json.loads(chunks)
+                result = self._send_request(request, deadline)
                 content = self._response_text(result)
                 if any(key in content for key in known_keys):
                     raise ProposalError("Provider response contains credentials; proposal rejected")
@@ -397,12 +488,25 @@ class EditProvider:
                 if _contains_known_key(value, known_keys) or contains_credentials(decoded):
                     raise ProposalError("Provider response contains credentials; proposal rejected")
                 return parse_proposal(value, finding["path"], source, settings.max_file_bytes)
-            except (httpx.TimeoutException, httpx.NetworkError) as error:
-                if retry == 0:
-                    continue
-                raise ProposalError("Provider failed after two bounded attempts") from error
-            except (KeyError, IndexError, TypeError, ValueError) as error:
-                raise ProposalError("Provider returned malformed structured content") from error
-            except httpx.HTTPError as error:
-                raise ProposalError("Provider request failed") from error
-        raise ProposalError("Provider retry limit reached")
+            except ProviderAvailabilityError as error:
+                if transition != 0 or backup is None or not self._fallback_allowed():
+                    raise
+                if time.monotonic() >= deadline:
+                    raise ProposalError("Run time limit reached before provider fallback") from None
+                if self.calls >= settings.llm_max_calls:
+                    raise ProposalError("Provider call budget exhausted before fallback") from None
+                self._fallback_history.append(
+                    {
+                        "from_provider": self.provider,
+                        "from_model": self.model,
+                        "to_provider": "openai",
+                        "to_model": settings.llm_model,
+                        "reason": error.reason,
+                        "provider_calls": self.calls,
+                    }
+                )
+                self._active_provider = "openai"
+                request = backup
+            except (KeyError, IndexError, TypeError, ValueError):
+                raise ProposalError("Provider returned malformed structured content") from None
+        raise ProposalError("Provider transition limit reached")

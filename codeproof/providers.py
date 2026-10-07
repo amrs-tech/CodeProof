@@ -122,29 +122,61 @@ def resolve_provider(
         raise ProviderConfigurationError(
             "Configure this provider's key in .env or enter a run-only key"
         )
+    fallback = bool(
+        config.llm_fallback_enabled
+        and config.llm_provider == "auto"
+        and not provider
+        and chosen == "gemini"
+        and config.llm_api_key
+        and config.llm_max_calls > 0
+    )
+    if fallback:
+        backup_model = config.llm_model or DEFAULT_OPENAI_MODEL
+        if _sensitive_model(config, backup_model):
+            raise ProviderConfigurationError(
+                "Backup model must be a model identifier, not a credential"
+            )
+        _validate_model("openai", backup_model)
     updates = {
         "llm_provider": chosen,
+        "llm_fallback_enabled": fallback,
         "llm_reasoning_effort": reasoning_effort or config.llm_reasoning_effort,
-        # Only the chosen provider credential is retained in the pending review.
-        "llm_api_key": key if chosen == "openai" else "",
+        # The auto environment policy retains only the explicitly configured backup key.
+        "llm_api_key": key if chosen == "openai" else (config.llm_api_key if fallback else ""),
         "gemini_api_key": key if chosen == "gemini" else "",
-        "llm_model": chosen_model if chosen == "openai" else config.llm_model,
+        "llm_model": chosen_model
+        if chosen == "openai"
+        else (config.llm_model or DEFAULT_OPENAI_MODEL),
         "gemini_model": chosen_model if chosen == "gemini" else config.gemini_model,
     }
     resolved = config.model_copy(update=updates)
-    return resolved, provider_metadata(resolved, "byok" if api_key else "environment")
+    metadata = provider_metadata(resolved, "byok" if api_key else "environment")
+    if fallback:
+        metadata["fallback"] = {
+            "provider": "openai",
+            "model": resolved.llm_model,
+            "reasoning_effort": EditProvider(
+                resolved.model_copy(update={"llm_provider": "openai"})
+            ).public_metadata["reasoning_effort"],
+            "credential_source": "environment",
+        }
+    return resolved, metadata
 
 
 def recover_run_settings(config: Settings, metadata: dict) -> Settings:
     if not metadata:
         # Old queue rows have no auditable provider choice; do not enable newly added keys.
-        return config.model_copy(update={"llm_api_key": "", "gemini_api_key": ""})
+        return config.model_copy(
+            update={"llm_api_key": "", "gemini_api_key": "", "llm_fallback_enabled": False}
+        )
     if metadata.get("credential_source") not in {"byok", "environment", "none"}:
         raise ProviderConfigurationError("Saved provider configuration is invalid; submit again")
     if metadata.get("credential_source") == "byok":
         raise ProviderConfigurationError("Run-only provider key expired; submit the review again")
     if metadata.get("credential_source") == "none":
-        offline = config.model_copy(update={"llm_api_key": "", "gemini_api_key": ""})
+        offline = config.model_copy(
+            update={"llm_api_key": "", "gemini_api_key": "", "llm_fallback_enabled": False}
+        )
         if not metadata.get("provider"):
             return offline
         provider = metadata["provider"]
@@ -160,12 +192,38 @@ def recover_run_settings(config: Settings, metadata: dict) -> Settings:
                 or config.llm_reasoning_effort,
             }
         )
-    return resolve_provider(
+    recovered = resolve_provider(
         config,
         metadata.get("provider", ""),
         metadata.get("model", ""),
         reasoning_effort=metadata.get("reasoning_effort") or "",
     )[0]
+    backup = metadata.get("fallback")
+    if backup:
+        if (
+            metadata.get("provider") != "gemini"
+            or backup.get("provider") != "openai"
+            or backup.get("credential_source") != "environment"
+        ):
+            raise ProviderConfigurationError(
+                "Saved backup provider configuration is invalid; submit again"
+            )
+        # Restore the recorded destination, never silently substitute a different configured model.
+        backup_config = resolve_provider(
+            config,
+            "openai",
+            backup.get("model", ""),
+            reasoning_effort=backup.get("reasoning_effort") or "",
+        )[0]
+        recovered = recovered.model_copy(
+            update={
+                "llm_api_key": backup_config.llm_api_key,
+                "llm_model": backup_config.llm_model,
+                "llm_reasoning_effort": backup_config.llm_reasoning_effort,
+                "llm_fallback_enabled": config.llm_fallback_enabled,
+            }
+        )
+    return recovered
 
 
 def provider_health(config: Settings) -> dict:
@@ -192,4 +250,12 @@ def provider_health(config: Settings) -> dict:
         "selected_model": selected["model"],
         "providers": entries,
         "provider_notice": notice,
+        "fallback_configured": bool(
+            config.llm_provider == "auto"
+            and config.llm_fallback_enabled
+            and selected["provider"] == "gemini"
+            and all(entry["configured"] for entry in entries)
+        ),
+        "fallback_provider": "openai",
+        "fallback_model": next(entry["model"] for entry in entries if entry["id"] == "openai"),
     }

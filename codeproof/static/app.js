@@ -173,20 +173,23 @@
     const provider = $("model-provider").value;
     const explicit = provider === "openai" || provider === "gemini";
     const info = providerInfo(provider);
+    const selected = state.health?.selected_provider;
+    const model = state.health?.selected_model;
+    const backup = state.health?.fallback_configured && state.health?.fallback_provider;
+    const backupModel = state.health?.fallback_model;
     $("model-provider").disabled = state.submitting;
     $("model-name").disabled = state.submitting || !explicit;
     $("model-api-key").disabled = state.submitting || !explicit;
     $("model-reasoning").disabled = state.submitting || provider !== "openai";
     $("reasoning-field").hidden = provider !== "openai";
     $("model-fields").classList.toggle("no-reasoning", provider !== "openai");
-    $("model-mode-label").textContent = explicit ? `${providerLabel(provider)} · This review` : "Server default";
+    $("model-mode-label").textContent = explicit ? `${providerLabel(provider)} · Pinned` : backup && selected ? `${providerLabel(selected)} → ${providerLabel(backup)} backup` : "Server default";
     $("model-name").placeholder = explicit ? info?.model || (provider === "openai" ? "gpt-6-luna" : "Provider model name") : "Choose a provider first";
     $("model-name-help").textContent = explicit && info?.model ? `Leave blank to use ${info.model}.` : "Leave blank to use the selected provider’s default model.";
     $("model-api-key").placeholder = explicit ? "API key for this review" : "Choose a provider first";
     $("model-key-help").textContent = !explicit ? "Choose a provider to use your own key. Leave blank to use its server key when configured." : info?.configured ? `Leave blank to use the server’s configured ${providerLabel(provider)} key.` : info ? `No server key is configured for ${providerLabel(provider)}. Add your key to enable model proposals for this review.` : "Leave blank to use this provider’s server key when configured.";
-    const selected = state.health?.selected_provider;
-    const model = state.health?.selected_model;
-    $("model-config-summary").textContent = selected ? `Server default: ${providerLabel(selected)}${model ? ` · ${model}` : ""}. Choose a provider to override it for this review.` : "Use the server’s defaults, or choose a provider for this review.";
+    $("model-config-summary").textContent = selected ? `Server default: ${providerLabel(selected)}${model ? ` · ${model}` : ""}.${backup ? ` Backup: ${providerLabel(backup)}${backupModel ? ` · ${backupModel}` : ""}.` : ""}` : "Use the server’s defaults, or choose a provider for this review.";
+    $("provider-policy").textContent = explicit ? `This review stays on ${providerLabel(provider)}. Automatic fallback to another provider is disabled, including when you bring your own key.` : backup && selected ? `If ${providerLabel(selected)} is unavailable or cannot be reached, CodeProof can use ${providerLabel(backup)} with its configured server key, within the same review limits. Choose a provider to keep this review on that provider.` : state.health ? "Automatic fallback is not configured. Choose a provider to use its server key or bring your own key for this review." : "Checking the server’s provider and backup settings. Choose a provider to keep this review on that provider.";
   }
 
   function captureModelSettings(form) {
@@ -231,6 +234,7 @@
       const ready = health.database === "ready";
       const parts = [ready ? "Review service ready" : "Database unavailable"];
       parts.push(health.provider_configured ? `${providerLabel(health.selected_provider || "AI")} configured${health.selected_model ? ` · ${health.selected_model}` : ""}` : "Local checks available · Server model key not configured");
+      if (health.fallback_configured && health.fallback_provider) parts.push(`${providerLabel(health.fallback_provider)} backup${health.fallback_model ? ` · ${health.fallback_model}` : ""}`);
       parts.push(health.sandbox_enabled ? "Behavioral sandbox enabled" : "Static verification only");
       $("service-status").textContent = parts.join(" / ");
       $("service-status").classList.toggle("unavailable", !ready);
@@ -549,23 +553,54 @@
     if (Object.keys(metrics).length) $("report-actions").append(detailBlock("Run limits and metrics", metrics));
   }
 
-  function renderProviderMetadata(run) {
-    const metadata = run.source?.provider;
+  function renderProviderMetadata(run, report = run.report) {
+    const initial = run.source?.provider;
+    const actual = report?.provider;
+    const metadata = actual && typeof actual === "object" ? actual : initial;
     $("report-provider").replaceChildren();
+    $("provider-history").replaceChildren();
+    $("provider-history").hidden = true;
     $("report-provider").hidden = !metadata || typeof metadata !== "object";
     if (!metadata || typeof metadata !== "object") return;
     const credentials = { byok: "Own key · This review", environment: "Server environment", none: "No provider key" };
     const items = [
-      ["Provider", metadata.provider ? providerLabel(metadata.provider) : "Not recorded"],
-      ["Model", metadata.model || "Not recorded"],
+      ["Provider", metadata.actual_provider || metadata.provider ? providerLabel(metadata.actual_provider || metadata.provider) : "Not recorded"],
+      ["Model", metadata.actual_model || metadata.model || "Not recorded"],
       ["Reasoning effort", metadata.reasoning_effort ? humanize(metadata.reasoning_effort) : "Not applicable"],
-      ["Credential source", credentials[metadata.credential_source] || "Not recorded"],
+      ["Credential source", credentials[metadata.credential_source || initial?.credential_source] || "Not recorded"],
     ];
     for (const [label, value] of items) {
       const entry = element("dl");
       entry.append(element("dt", "", label), element("dd", "", value));
       $("report-provider").append(entry);
     }
+    if (metadata.requested_provider || metadata.requested_model) {
+      const requested = [metadata.requested_provider ? providerLabel(metadata.requested_provider) : "Not recorded", metadata.requested_model].filter(Boolean).join(" · ");
+      const note = element("p");
+      note.append(element("strong", "", "Requested: "), document.createTextNode(requested));
+      $("provider-history").append(note);
+    }
+    if (typeof metadata.provider_calls === "number") $("provider-history").append(element("p", "", `Model calls: ${metadata.provider_calls}`));
+    if (metadata.fallback_reason) {
+      const reason = element("p");
+      reason.append(element("strong", "", "Backup reason: "), document.createTextNode(stringify(metadata.fallback_reason)));
+      $("provider-history").append(reason);
+    }
+    const history = Array.isArray(metadata.fallback_history) ? metadata.fallback_history : [];
+    if (history.length) {
+      const list = element("ol");
+      for (const step of history) {
+        if (!step || typeof step !== "object") continue;
+        const from = [step.from_provider ? providerLabel(step.from_provider) : "Unknown provider", step.from_model].filter(Boolean).join(" · ");
+        const to = [step.to_provider ? providerLabel(step.to_provider) : "Unknown provider", step.to_model].filter(Boolean).join(" · ");
+        const parts = [`${from} → ${to}`];
+        if (step.reason) parts.push(stringify(step.reason));
+        if (typeof step.provider_calls === "number") parts.push(`Calls at switch: ${step.provider_calls}`);
+        list.append(element("li", "", parts.join(". ")));
+      }
+      if (list.children.length) $("provider-history").append(list);
+    }
+    $("provider-history").hidden = !$("provider-history").children.length;
   }
 
   function renderReport(report, run) {
@@ -573,7 +608,7 @@
     const titles = { improved: "Verified improvements, ready for review.", reviewed: "Review complete.", stopped: "Review stopped at a guardrail.", failed: "Review ended with an error." };
     $("report-title").textContent = titles[report.status || run.status] || "Review evidence";
     $("report-summary").textContent = stringify(report.summary) || "Inspect the findings and validation evidence for this review.";
-    renderProviderMetadata(run);
+    renderProviderMetadata(run, report);
     const findings = asArray(report.findings).map((value) => typeof value === "object" && value !== null ? value : { message: value });
     const actions = asArray(report.actions);
     renderMetrics(report, findings);

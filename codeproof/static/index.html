@@ -64,8 +64,9 @@
             <details id="model-settings" class="model-settings">
               <summary><span>Model settings <span class="optional">optional</span></span><span id="model-mode-label" class="model-mode-label">Server default</span></summary>
               <p id="model-config-summary" class="field-hint">Use the server’s defaults, or choose a provider for this review.</p>
+              <p id="provider-policy" class="provider-policy">Choose a provider or use your own key to keep this review on that provider.</p>
               <div id="model-fields" class="model-fields no-reasoning">
-                <div><label for="model-provider">Provider</label><select id="model-provider" name="model_provider" aria-describedby="model-config-summary"><option value="">Server default</option><option value="openai">OpenAI</option><option value="gemini">Gemini</option></select></div>
+                <div><label for="model-provider">Provider</label><select id="model-provider" name="model_provider" aria-describedby="model-config-summary provider-policy"><option value="">Server default</option><option value="openai">OpenAI</option><option value="gemini">Gemini</option></select></div>
                 <div><label for="model-name">Model name <span class="optional">optional</span></label><input id="model-name" name="model_name" type="text" maxlength="128" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Choose a provider first" disabled aria-describedby="model-name-help" /><p id="model-name-help" class="field-hint">Leave blank to use the selected provider’s default model.</p></div>
                 <div class="model-key-field"><label for="model-api-key">Provider API key <span class="optional">optional</span></label><input id="model-api-key" name="model_api_key" type="password" maxlength="4096" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Choose a provider first" disabled aria-describedby="model-key-help model-key-lifetime" /><p id="model-key-help" class="field-hint">Choose a provider to use your own key. Leave blank to use its server key when configured.</p></div>
                 <div id="reasoning-field" hidden><label for="model-reasoning">OpenAI reasoning effort</label><select id="model-reasoning" name="model_reasoning_effort" disabled><option value="none">None</option><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Maximum</option></select></div>
@@ -103,6 +104,7 @@
           <div id="report-content" hidden>
             <div class="report-overview"><div><p class="step-label">REVIEW OUTCOME</p><h3 id="report-title">Review complete</h3><p id="report-summary"></p></div><div class="download-actions"><button id="download-patch" type="button" class="button primary small">↓ Download patch</button><button id="download-html" type="button" class="button secondary small">↓ HTML report</button><button id="download-markdown" type="button" class="text-button">Markdown</button><button id="download-json" type="button" class="text-button">JSON</button></div></div>
             <div id="report-provider" class="provider-metadata" hidden></div>
+            <div id="provider-history" class="provider-history" hidden></div>
             <p id="download-error" class="inline-error" role="alert" hidden></p>
             <div id="report-metrics" class="metric-grid" aria-label="Review metrics"></div>
             <div id="stop-reason" class="notice" hidden></div>

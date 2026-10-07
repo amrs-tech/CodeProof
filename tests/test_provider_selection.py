@@ -43,7 +43,10 @@ def test_auto_requires_both_gemini_key_and_model_and_explicit_provider_wins():
     resolved, metadata = resolve_provider(both)
     assert metadata["provider"] == "gemini"
     assert metadata["reasoning_effort"] is None
-    assert resolved.llm_api_key == ""
+    assert resolved.llm_api_key == "openai-test"
+    assert resolved.llm_fallback_enabled
+    assert metadata["fallback"]["provider"] == "openai"
+    assert metadata["fallback"]["model"] == "gpt-6-luna"
     assert resolve_provider(both, "openai")[0].gemini_api_key == ""
     assert (
         resolve_provider(both.model_copy(update={"llm_provider": "openai"}))[1]["provider"]
@@ -63,6 +66,50 @@ def test_byok_is_run_scoped_without_mutating_environment_settings():
     assert "run-test" not in json.dumps(public)
     assert "run-test" not in repr(first)
     assert "other-test" not in repr(original)
+    assert not first.llm_fallback_enabled
+
+
+def test_explicit_and_disabled_policies_do_not_retain_backup_credentials():
+    both = config(
+        llm_api_key="openai-test", gemini_api_key="gemini-test", gemini_model="gemini-3.8-flash"
+    )
+    for settings, provider, key in (
+        (both, "gemini", ""),
+        (both, "gemini", "byok-test"),
+        (both.model_copy(update={"llm_fallback_enabled": False}), "", ""),
+        (both.model_copy(update={"llm_provider": "gemini"}), "", ""),
+    ):
+        resolved, metadata = resolve_provider(settings, provider, api_key=key)
+        assert not resolved.llm_fallback_enabled
+        assert resolved.llm_api_key == ""
+        assert "fallback" not in metadata
+
+
+def test_fallback_health_and_recovery_preserve_recorded_destinations():
+    initial = config(
+        llm_api_key="openai-test",
+        llm_model="gpt-6-luna",
+        gemini_api_key="gemini-test",
+        gemini_model="gemini-3.8-flash",
+    )
+    health = provider_health(initial)
+    assert health["fallback_configured"]
+    assert health["fallback_provider"] == "openai"
+    _, metadata = resolve_provider(initial)
+    changed = initial.model_copy(update={"llm_model": "new-model", "gemini_model": "gemini-new"})
+    recovered = recover_run_settings(changed, metadata)
+    assert recovered.llm_fallback_enabled
+    assert recovered.llm_model == "gpt-6-luna"
+    assert recovered.gemini_model == "gemini-3.8-flash"
+    disabled = recover_run_settings(
+        changed.model_copy(update={"llm_fallback_enabled": False}), metadata
+    )
+    assert not disabled.llm_fallback_enabled
+    pinned = {key: value for key, value in metadata.items() if key != "fallback"}
+    assert not recover_run_settings(changed, pinned).llm_fallback_enabled
+    bad = {**metadata, "fallback": {**metadata["fallback"], "provider": "gemini"}}
+    with pytest.raises(ProviderConfigurationError, match="invalid"):
+        recover_run_settings(initial, bad)
 
 
 @pytest.mark.parametrize(

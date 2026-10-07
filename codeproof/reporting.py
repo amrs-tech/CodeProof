@@ -20,6 +20,18 @@ def markdown_report(run: dict) -> str:
         lines.extend(["## Review configuration", ""])
         lines.extend(f"- {label}: {_markdown_text(value)}" for label, value in configuration)
         lines.append("")
+    history = _fallback_history(report)
+    if history:
+        lines.extend(["## Provider fallback history", ""])
+        for index, transition in enumerate(history, 1):
+            lines.extend(
+                [
+                    f"{index}. {_markdown_text(_fallback_transition(transition))}",
+                    f"   Reason: {_markdown_text(_fallback_reason(transition.get('reason')))}",
+                    f"   Shared provider calls at transition: {_count(transition.get('provider_calls'))}.",
+                    "",
+                ]
+            )
     lines.extend(
         [
             "## Outcome",
@@ -189,10 +201,18 @@ def _provider_details(run: dict, report: dict) -> list[tuple[str, object]]:
         details.append(
             (
                 "Review provider",
-                provider.get("name") or provider.get("provider") or _text(provider_value),
+                provider.get("actual_provider")
+                or provider.get("provider")
+                or provider.get("name")
+                or (_text(provider_value) if not provider else "Not recorded"),
             )
         )
-    model = provider.get("model") or report.get("model") or source.get("model")
+    model = (
+        provider.get("actual_model")
+        or provider.get("model")
+        or report.get("model")
+        or source.get("model")
+    )
     if model or "model" in provider:
         details.append(("Model", model or "No model configured"))
     if "reasoning_effort" in provider:
@@ -217,7 +237,79 @@ def _provider_details(run: dict, report: dict) -> list[tuple[str, object]]:
         )
     if provider.get("mode"):
         details.append(("Provider mode", provider["mode"]))
+    requested_provider = provider.get("requested_provider")
+    requested_model = provider.get("requested_model")
+    if not requested_provider and _fallback_history(report):
+        initial = _mapping(source.get("provider"))
+        requested_provider = initial.get("provider") or initial.get("name")
+        requested_model = requested_model or initial.get("model")
+    if requested_provider:
+        details.append(("Requested provider", requested_provider))
+    if requested_model:
+        details.append(("Requested model", requested_model))
+    if provider.get("fallback_reason"):
+        details.append(("Fallback reason", _fallback_reason(provider["fallback_reason"])))
+    metrics = _mapping(report.get("metrics"))
+    calls = provider.get("provider_calls", metrics.get("provider_calls"))
+    if calls is not None:
+        details.append(("Provider calls", _count(calls)))
     return details
+
+
+def _fallback_reason(value: object) -> str:
+    """Only fixed availability reasons become readable audit prose."""
+    reasons = {
+        "rate_limit_or_quota": "The primary provider reached a rate limit or quota limit.",
+        "service_unavailable": "The primary provider service was unavailable.",
+        "network_failure": "The primary provider network request failed.",
+        "timeout": "The primary provider request timed out.",
+        "authentication_unavailable": "The primary provider authentication was unavailable.",
+        "model_unavailable": "The requested primary model was unavailable.",
+    }
+    return reasons.get(
+        _text(value), "Provider availability failure; no recognized reason was recorded."
+    )
+
+
+def _fallback_history(report: dict) -> list[dict]:
+    provider = _mapping(report.get("provider"))
+    history = provider.get("fallback_history", report.get("fallback_history"))
+    return [_mapping(item) for item in _items(history) if isinstance(item, dict)]
+
+
+def _fallback_transition(transition: dict) -> str:
+    primary = _text(transition.get("from_provider")) or "Primary provider"
+    backup = _text(transition.get("to_provider")) or "Backup provider"
+    if transition.get("from_model"):
+        primary += " / " + _text(transition["from_model"])
+    if transition.get("to_model"):
+        backup += " / " + _text(transition["to_model"])
+    return f"{primary} → {backup}"
+
+
+def _fallback_html(report: dict) -> str:
+    history = _fallback_history(report)
+    if not history:
+        return ""
+    cards = []
+    for index, transition in enumerate(history, 1):
+        cards.append(
+            '<article class="action"><div class="card-header">'
+            f"<h3>{_html(_fallback_transition(transition))}</h3>"
+            f'<span class="badge warning">Fallback {index}</span></div>'
+            f'<p class="reason">{_html(_fallback_reason(transition.get("reason")))}</p>'
+            f'<p class="fineprint">Shared provider calls at transition: {_count(transition.get("provider_calls"))}. '
+            "The backup remains selected for the rest of this review.</p>"
+            + _evidence(transition, "Inspect fallback record")
+            + "</article>"
+        )
+    return (
+        '<section class="section" aria-labelledby="fallback-heading"><div class="section-heading">'
+        '<h2 id="fallback-heading">Provider fallback history</h2>'
+        '<span class="section-note">One-way transition · shared budget</span></div>'
+        + "".join(cards)
+        + "</section>"
+    )
 
 
 def _items(value: object) -> list:
@@ -505,7 +597,8 @@ def html_report(run: dict) -> str:
         '<div class="content"><section class="section" aria-labelledby="outcome-heading">'
         '<p class="eyebrow">Review outcome</p><h2 id="outcome-heading" class="summary">'
         f'{_html(summary)}</h2><div class="metrics">{metric_html}</div>{provenance_html}</section>'
-        '<section class="section" aria-labelledby="findings-heading"><div class="section-heading">'
+        + _fallback_html(report)
+        + '<section class="section" aria-labelledby="findings-heading"><div class="section-heading">'
         '<h2 id="findings-heading">Findings &amp; rationale</h2>'
         f'<span class="section-note">{len(findings)} recorded item(s)</span></div>{finding_html}</section>'
         '<section class="section" aria-labelledby="actions-heading"><div class="section-heading">'

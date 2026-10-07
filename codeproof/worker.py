@@ -58,7 +58,11 @@ def work(store, settings: Settings, stop: Event, vault: RunSettingsVault | None 
             )
             if not store.worker_lock_healthy():
                 raise WorkerOwnershipLost
-            report["provider"] = run.get("source", {}).get("provider", report.get("provider", {}))
+            # Executed provider metadata wins over the original intake choice after fallback.
+            report["provider"] = {
+                **run.get("source", {}).get("provider", {}),
+                **report.get("provider", {}),
+            }
             store.finish_run(run_id, report)
         except WorkerOwnershipLost:
             logger.error("Worker ownership lost; interrupted review left for restart recovery.")
