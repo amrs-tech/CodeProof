@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#142c26" />
+    <meta name="description" content="Review Python repositories, apply bounded fixes, and inspect the evidence behind each change." />
+    <title>CodeProof · Repository review</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Workspace navigation">
+        <a class="brand" href="/" aria-label="CodeProof home">
+          <span class="brand-mark" aria-hidden="true">C<span>✓</span></span>
+          <span>CodeProof<span class="brand-caption">Evidence for every change</span></span>
+        </a>
+        <div class="workspace-label"><span class="workspace-dot" aria-hidden="true"></span> Local workspace</div>
+        <div class="sidebar-section-heading">
+          <h2>Recent reviews</h2>
+          <button id="refresh-runs" type="button" class="icon-button" aria-label="Refresh recent reviews" title="Refresh recent reviews">↻</button>
+        </div>
+        <p id="recent-message" class="sidebar-hint" role="status">Loading recent reviews…</p>
+        <ul id="recent-runs" class="recent-runs"></ul>
+        <div class="sidebar-bottom">
+          <div class="scope-note"><span aria-hidden="true">⌘</span><div><strong>Python first</strong><p>Targeted remediation with a reviewable patch.</p></div></div>
+          <details class="connection-settings">
+            <summary>Connection settings</summary>
+            <label for="api-token">API token <span class="optional">optional</span></label>
+            <input id="api-token" type="password" autocomplete="off" spellcheck="false" placeholder="Enter your local API token" aria-describedby="token-help" />
+            <p id="token-help">Used only in this page’s memory. Enter the token configured for your server.</p>
+          </details>
+          <p class="version-label">CODEPROOF / LOCAL REVIEW</p>
+        </div>
+      </aside>
+
+      <main id="main" class="main-content">
+        <header class="page-header">
+          <p class="eyebrow">REPOSITORY REVIEW</p>
+          <div class="header-row"><h1>Better code. Backed by evidence.</h1><span class="local-badge"><span aria-hidden="true"></span> Local execution</span></div>
+          <p class="page-intro">Find fragile implementations, apply focused fixes, and see exactly what was verified.</p>
+          <p id="service-status" class="service-status" role="status">Checking the review service…</p>
+        </header>
+
+        <section class="intake-card" aria-labelledby="intake-title">
+          <div class="section-title-row"><div><p class="step-label">01 / SOURCE</p><h2 id="intake-title">Bring your repository</h2></div><span class="pill neutral">Python repositories</span></div>
+          <div class="source-tabs" role="tablist" aria-label="Repository source">
+            <button id="github-tab" type="button" role="tab" aria-selected="true" aria-controls="github-panel" class="source-tab active"><span aria-hidden="true">⌥</span> GitHub repository</button>
+            <button id="zip-tab" type="button" role="tab" aria-selected="false" aria-controls="zip-panel" tabindex="-1" class="source-tab"><span aria-hidden="true">↥</span> Upload ZIP</button>
+          </div>
+          <form id="review-form" novalidate>
+            <div id="github-panel" role="tabpanel" aria-labelledby="github-tab">
+              <label for="repository">Public repository</label>
+              <div class="repository-input"><span aria-hidden="true">↗</span><input id="repository" name="repository" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="owner/repository or https://github.com/owner/repository" aria-describedby="repository-help" /></div>
+              <p id="repository-help" class="field-hint">Use a public GitHub repository URL or its owner/repository name.</p>
+            </div>
+            <div id="zip-panel" role="tabpanel" aria-labelledby="zip-tab" hidden>
+              <label class="upload-zone" for="source-file" id="upload-zone"><span class="upload-icon" aria-hidden="true">↥</span><strong id="file-label">Choose a source code ZIP</strong><span id="file-help">or drag and drop it here</span><input id="source-file" name="file" type="file" accept=".zip,application/zip,application/x-zip-compressed" aria-describedby="zip-help" /></label>
+              <p id="zip-help" class="field-hint">Upload source files. Archive and repository limits are enforced by the server.</p>
+            </div>
+            <p id="form-error" class="inline-error" role="alert" hidden></p>
+            <div class="intake-footer"><p><span class="lock-icon" aria-hidden="true">▣</span> Fixes stay in an isolated copy. You review and apply the patch.</p><button id="start-review" class="button primary" type="submit">Start review <span aria-hidden="true">→</span></button></div>
+          </form>
+        </section>
+
+        <section id="review-section" class="review-section" aria-labelledby="review-title">
+          <div class="section-heading"><div><p class="step-label">02 / REVIEW</p><h2 id="review-title">The evidence, at a glance</h2></div><span id="run-status" class="pill neutral">Ready to review</span></div>
+          <div id="run-progress" class="progress-card" hidden>
+            <div class="progress-top"><div><h3 id="run-name">Repository review</h3><p id="run-meta" class="muted"></p></div><button id="refresh-detail" type="button" class="button secondary small">Refresh report</button></div>
+            <ol class="pipeline" aria-label="Review stages">
+              <li data-stage="intake"><span class="stage-dot" aria-hidden="true"></span><span>Receive</span></li>
+              <li data-stage="analyze"><span class="stage-dot" aria-hidden="true"></span><span>Analyze</span></li>
+              <li data-stage="repair"><span class="stage-dot" aria-hidden="true"></span><span>Improve</span></li>
+              <li data-stage="validate"><span class="stage-dot" aria-hidden="true"></span><span>Validate</span></li>
+              <li data-stage="report"><span class="stage-dot" aria-hidden="true"></span><span>Report</span></li>
+            </ol>
+            <div class="progress-detail"><span id="activity-dot" class="activity-dot" aria-hidden="true"></span><p id="run-detail" role="status" aria-live="polite">Preparing the review…</p></div>
+            <p id="polling-notice" class="notice" role="status" hidden></p>
+          </div>
+
+          <div id="empty-state" class="empty-state">
+            <div class="empty-visual" aria-hidden="true"><span class="empty-line"></span><span class="empty-code">{ }</span><span class="empty-check">✓</span></div>
+            <h3>Your next improvement starts here.</h3>
+            <p>Add a repository to get a prioritized review, a targeted patch, and a record of the checks behind it.</p>
+            <div class="promise-row"><span><span aria-hidden="true">✓</span> Bounded attempts</span><span><span aria-hidden="true">✓</span> Verification before acceptance</span><span><span aria-hidden="true">✓</span> Clear rationale</span></div>
+          </div>
+
+          <div id="report-content" hidden>
+            <div class="report-overview"><div><p class="step-label">REVIEW OUTCOME</p><h3 id="report-title">Review complete</h3><p id="report-summary"></p></div><div class="download-actions"><button id="download-patch" type="button" class="button primary small">↓ Download patch</button><button id="download-markdown" type="button" class="button secondary small">↓ Report</button><button id="download-json" type="button" class="text-button">JSON</button></div></div>
+            <p id="download-error" class="inline-error" role="alert" hidden></p>
+            <div id="report-metrics" class="metric-grid" aria-label="Review metrics"></div>
+            <div id="stop-reason" class="notice" hidden></div>
+            <div class="report-panel"><div class="panel-heading"><h3>Findings &amp; actions</h3><span id="findings-count" class="muted"></span></div><p class="panel-description">Each action includes its rationale and final disposition.</p><div id="findings" class="findings-list"></div></div>
+            <div id="actions-panel" class="report-panel" hidden><h3>Action record</h3><p class="panel-description">The attempted changes and the decisions made during this review.</p><div id="report-actions" class="prose-list"></div></div>
+            <div class="report-panel"><div class="panel-heading"><h3>Verification evidence</h3><span class="pill neutral">Coverage matters</span></div><p class="panel-description">Static checks assess code structure. Behavioral checks exercise code. A passing static check alone does not establish behavioral correctness.</p><div id="validations" class="validation-list"></div></div>
+            <div id="rationale-panel" class="report-panel" hidden><h3>Review rationale</h3><div id="report-rationale" class="prose-list"></div></div>
+            <div id="limitations-panel" class="report-panel limitations-panel" hidden><h3>Scope &amp; limitations</h3><div id="report-limitations" class="prose-list"></div></div>
+            <p class="report-footnote">The patch is a proposal for your repository. Review the diff and run your project’s checks before applying it.</p>
+          </div>
+        </section>
+        <footer class="page-footer"><span>CodeProof</span><p>Small changes. Explicit boundaries. Traceable results.</p></footer>
+      </main>
+    </div>
+  </body>
+</html>

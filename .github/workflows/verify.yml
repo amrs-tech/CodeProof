@@ -1,0 +1,35 @@
+name: Verify CodeProof
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.2-pg17
+        env:
+          POSTGRES_DB: codeproof_test
+          POSTGRES_USER: codeproof
+          POSTGRES_PASSWORD: codeproof
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U codeproof -d codeproof_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CODEPROOF_TEST_DATABASE_URL: postgresql://codeproof:codeproof@localhost:5432/codeproof_test
+      CODEPROOF_TEST_SANDBOX: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.lock && pip install --no-deps -e .
+      - run: docker build -f Dockerfile.sandbox -t codeproof-sandbox:local .
+      - run: ruff check . && ruff format --check .
+      - run: pytest --cov=codeproof --cov-report=term-missing
+      - run: docker build -t codeproof-app:ci .

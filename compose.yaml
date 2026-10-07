@@ -1,0 +1,36 @@
+services:
+  db:
+    image: pgvector/pgvector:0.8.2-pg17
+    environment:
+      POSTGRES_DB: codeproof
+      POSTGRES_USER: codeproof
+      POSTGRES_PASSWORD: ${CODEPROOF_DB_PASSWORD:-codeproof}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codeproof -d codeproof"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      CODEPROOF_DATABASE_URL: postgresql://codeproof:${CODEPROOF_DB_PASSWORD:-codeproof}@db:5432/codeproof
+      CODEPROOF_DATA_DIR: /app/data
+      CODEPROOF_LLM_BASE_URL: ${CODEPROOF_LLM_BASE_URL:-https://api.openai.com/v1}
+      CODEPROOF_LLM_API_KEY: ${CODEPROOF_LLM_API_KEY:-}
+      CODEPROOF_LLM_MODEL: ${CODEPROOF_LLM_MODEL:-}
+      CODEPROOF_API_TOKEN: ${CODEPROOF_API_TOKEN:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - review_data:/app/data
+    restart: "no"
+volumes:
+  postgres_data:
+  review_data:
