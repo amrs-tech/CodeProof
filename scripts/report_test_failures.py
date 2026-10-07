@@ -1,8 +1,22 @@
 """Expose failed test names in CI annotations without publishing failure bodies or secrets."""
 
+import json
 import sys
 from pathlib import Path
 from xml.etree import ElementTree
+
+
+def summary_annotation(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    cases = list(ElementTree.parse(path).getroot().iter("testcase"))
+    counts = {
+        "tests": len(cases),
+        "failures": sum(case.find("failure") is not None for case in cases),
+        "errors": sum(case.find("error") is not None for case in cases),
+        "skipped": sum(case.find("skipped") is not None for case in cases),
+    }
+    return "::notice title=Verification summary::" + json.dumps(counts)
 
 
 def annotations(path: Path) -> list[str]:
@@ -22,5 +36,9 @@ def annotations(path: Path) -> list[str]:
 
 
 if __name__ == "__main__":
-    for annotation in annotations(Path(sys.argv[1])):
+    report = Path(sys.argv[1])
+    summary = summary_annotation(report)
+    if summary:
+        print(summary)
+    for annotation in annotations(report):
         print(annotation)

@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -171,6 +172,32 @@ def test_real_sandbox_has_no_network_write_access_or_host_secret(tmp_path, monke
         sandbox_image=os.environ.get("CODEPROOF_SANDBOX_IMAGE", "codeproof-sandbox:local"),
     )
     result = run_tests(tmp_path, settings, time.monotonic() + 30)
+    if not result["passed"] or result["tests"] != 4:
+        details = result.get("details", "")
+        details = details if isinstance(details, str) else ""
+        category = {
+            "Sandbox tests exceeded their bounded execution time": "timeout",
+            "Docker sandbox is unavailable or returned invalid test metadata": "unavailable",
+            "Sandbox did not return a test-count verification marker": "missing_marker",
+        }.get(details, "unittest_counts")
+        counts = {"passed": result.get("passed") if type(result.get("passed")) is bool else None}
+        for key in ("tests", "failures", "errors", "skipped"):
+            value = result.get(key)
+            counts[key] = value if type(value) is int and value >= 0 else None
+        failed_checks = re.findall(
+            r"^(?:FAIL|ERROR): "
+            r"(test_source_is_read_only|test_network_is_disabled|"
+            r"test_host_secret_is_not_inherited|test_no_linux_capabilities)(?=\s|$)",
+            details,
+            flags=re.MULTILINE,
+        )
+        print(
+            "::error title=CodeProof sandbox security checks::"
+            + json.dumps(
+                {"category": category, **counts, "failed_checks": sorted(set(failed_checks))},
+                sort_keys=True,
+            )
+        )
     assert result["passed"] and result["tests"] == 4, result
     assert not (tmp_path / "injected.py").exists()
 
