@@ -34,5 +34,9 @@ def test_zip_to_persisted_review_and_downloads(tmp_path):
         assert run["report"]["patch"]
         assert 'return "hello"' in run["report"]["patch"]
         assert "CodeProof review report" in http.get(f"/api/runs/{run_id}/report").text
+        html = http.get(f"/api/runs/{run_id}/report?format=html")
+        assert html.status_code == 200
+        assert "greeting.py" in html.text
+        assert "Accepted changes" in html.text
         assert http.get(f"/api/runs/{run_id}/patch").status_code == 200
         assert any(item["id"] == run_id for item in http.get("/api/runs").json())

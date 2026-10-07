@@ -29,9 +29,9 @@
           <div class="scope-note"><span aria-hidden="true">⌘</span><div><strong>Python first</strong><p>Targeted remediation with a reviewable patch.</p></div></div>
           <details class="connection-settings">
             <summary>Connection settings</summary>
-            <label for="api-token">API token <span class="optional">optional</span></label>
-            <input id="api-token" type="password" autocomplete="off" spellcheck="false" placeholder="Enter your local API token" aria-describedby="token-help" />
-            <p id="token-help">Used only in this page’s memory. Enter the token configured for your server.</p>
+            <label for="api-token">CodeProof access token <span class="optional">optional</span></label>
+            <input id="api-token" type="password" autocomplete="off" spellcheck="false" placeholder="Enter your CodeProof access token" aria-describedby="token-help" />
+            <p id="token-help">Used only in this page’s memory to access your CodeProof server. This is separate from a model provider’s API key.</p>
           </details>
           <p class="version-label">CODEPROOF / LOCAL REVIEW</p>
         </div>
@@ -61,6 +61,18 @@
               <label class="upload-zone" for="source-file" id="upload-zone"><span class="upload-icon" aria-hidden="true">↥</span><strong id="file-label">Choose a source code ZIP</strong><span id="file-help">or drag and drop it here</span><input id="source-file" name="file" type="file" accept=".zip,application/zip,application/x-zip-compressed" aria-describedby="zip-help" /></label>
               <p id="zip-help" class="field-hint">Upload source files. Archive and repository limits are enforced by the server.</p>
             </div>
+            <details id="model-settings" class="model-settings">
+              <summary><span>Model settings <span class="optional">optional</span></span><span id="model-mode-label" class="model-mode-label">Server default</span></summary>
+              <p id="model-config-summary" class="field-hint">Use the server’s defaults, or choose a provider for this review.</p>
+              <div id="model-fields" class="model-fields no-reasoning">
+                <div><label for="model-provider">Provider</label><select id="model-provider" name="model_provider" aria-describedby="model-config-summary"><option value="">Server default</option><option value="openai">OpenAI</option><option value="gemini">Gemini</option></select></div>
+                <div><label for="model-name">Model name <span class="optional">optional</span></label><input id="model-name" name="model_name" type="text" maxlength="128" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Choose a provider first" disabled aria-describedby="model-name-help" /><p id="model-name-help" class="field-hint">Leave blank to use the selected provider’s default model.</p></div>
+                <div class="model-key-field"><label for="model-api-key">Provider API key <span class="optional">optional</span></label><input id="model-api-key" name="model_api_key" type="password" maxlength="4096" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Choose a provider first" disabled aria-describedby="model-key-help model-key-lifetime" /><p id="model-key-help" class="field-hint">Choose a provider to use your own key. Leave blank to use its server key when configured.</p></div>
+                <div id="reasoning-field" hidden><label for="model-reasoning">OpenAI reasoning effort</label><select id="model-reasoning" name="model_reasoning_effort" disabled><option value="none">None</option><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Maximum</option></select></div>
+              </div>
+              <p id="model-key-lifetime" class="key-lifetime">Your provider key is sent to the local server for this review only and kept in memory until completion or server restart. It is not saved in browser storage or on disk. The key field clears when you submit.</p>
+              <p id="provider-notice" class="notice" hidden></p>
+            </details>
             <p id="form-error" class="inline-error" role="alert" hidden></p>
             <div class="intake-footer"><p><span class="lock-icon" aria-hidden="true">▣</span> Fixes stay in an isolated copy. You review and apply the patch.</p><button id="start-review" class="button primary" type="submit">Start review <span aria-hidden="true">→</span></button></div>
           </form>
@@ -89,7 +101,8 @@
           </div>
 
           <div id="report-content" hidden>
-            <div class="report-overview"><div><p class="step-label">REVIEW OUTCOME</p><h3 id="report-title">Review complete</h3><p id="report-summary"></p></div><div class="download-actions"><button id="download-patch" type="button" class="button primary small">↓ Download patch</button><button id="download-markdown" type="button" class="button secondary small">↓ Report</button><button id="download-json" type="button" class="text-button">JSON</button></div></div>
+            <div class="report-overview"><div><p class="step-label">REVIEW OUTCOME</p><h3 id="report-title">Review complete</h3><p id="report-summary"></p></div><div class="download-actions"><button id="download-patch" type="button" class="button primary small">↓ Download patch</button><button id="download-html" type="button" class="button secondary small">↓ HTML report</button><button id="download-markdown" type="button" class="text-button">Markdown</button><button id="download-json" type="button" class="text-button">JSON</button></div></div>
+            <div id="report-provider" class="provider-metadata" hidden></div>
             <p id="download-error" class="inline-error" role="alert" hidden></p>
             <div id="report-metrics" class="metric-grid" aria-label="Review metrics"></div>
             <div id="stop-reason" class="notice" hidden></div>

@@ -9,7 +9,7 @@ CodeProof edits an isolated copy. It never pushes to a submitted repository. Thi
 - Establish a syntax, Ruff, and custom AST baseline before editing.
 - Detect fragile implementations such as mutable defaults, swallowed exceptions, undefined names, and dynamic execution, alongside maintenance debt.
 - Apply a small allowlist of conservative textual fixes automatically.
-- Use an optional OpenAI-compatible model for targeted source replacements. Substantive model edits require passing baseline and candidate tests in a restricted Docker sandbox.
+- Use OpenAI-compatible or native Gemini models for targeted source replacements. Substantive model edits require passing baseline and candidate tests in a restricted Docker sandbox.
 - Reject unexpected paths, stale source hashes, new findings, removed definitions, new imports, test edits, suppressed checks, duplicate proposals, and oversized changes. Failed validation restores the prior bytes.
 - Stop at per-finding attempts, total attempts, provider calls, time limits, or lack of progress.
 - Persist the queue, progress, findings, validation evidence, rationale, and reports in PostgreSQL. Use pgvector to retrieve related source chunks within the same run.
@@ -27,7 +27,26 @@ docker compose up --build
 
 On PowerShell, use `Copy-Item .env.example .env`. Open [CodeProof](http://localhost:8000). PostgreSQL and the UI bind to loopback. Startup initializes the schema and required vector extension.
 
-Static review and conservative fixes work without an API key. For model proposals, set `CODEPROOF_LLM_BASE_URL`, `CODEPROOF_LLM_API_KEY`, and `CODEPROOF_LLM_MODEL` in `.env`, then recreate the app service. The provider must support `/chat/completions` with strict JSON-schema responses; unsupported responses are reported and stopped safely.
+Static review and conservative fixes work without an API key. Set provider credentials in `.env`, then restart the native app or recreate the Compose app service. OpenAI-compatible providers must support `/chat/completions` with strict JSON-schema responses. Gemini uses its native `generateContent` API.
+
+## Model configuration and own keys
+
+| Setting | Default / purpose |
+| --- | --- |
+| `CODEPROOF_LLM_PROVIDER` | `auto`: Gemini when both its key and model are configured, otherwise OpenAI-compatible. Set `openai` or `gemini` to choose explicitly. |
+| `CODEPROOF_LLM_API_KEY` | OpenAI-compatible API key; blank disables this provider. |
+| `CODEPROOF_LLM_MODEL` | `gpt-6-luna`; a legacy blank value also resolves to this default. |
+| `CODEPROOF_LLM_REASONING_EFFORT` | `medium`; applied to supported OpenAI reasoning models, omitted for other compatible models. |
+| `CODEPROOF_LLM_BASE_URL` | `https://api.openai.com/v1`; custom endpoints are operator configuration. |
+| `CODEPROOF_GEMINI_API_KEY` | Gemini API key; blank disables this provider. |
+| `CODEPROOF_GEMINI_MODEL` | Set `gemini-3.8-flash` or another compatible Gemini text model. The sample environment includes Flash. |
+| `CODEPROOF_GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta` |
+
+The UI's optional **Model settings** let you choose a provider, override its model, and enter your own key for one review (BYOK). An empty key uses only that selected provider's environment key. OpenAI defaults to medium reasoning; Gemini uses its model's native thinking settings. Browser users cannot override server endpoint URLs. The CodeProof access token is separate from a model API key.
+
+Run-only keys stay in server memory until the worker consumes them, and are released after completion or failure. They are never saved in PostgreSQL, reports, source files, browser storage, or application logs. The input clears immediately on submission. Queued BYOK reviews lose their key on server restart and fail with a request to resubmit, instead of silently using an environment key. A report records only provider, model, applicable effort, and credential source.
+
+Gemini Live/audio models do not support the structured code-edit responses required here and are rejected before review submission. Quota/rate-limit errors receive at most two transport attempts per proposal, also counted against the overall call budget. There is no automatic switch to Live or another provider: choose another configured provider for a new review. See [Google's Live model documentation](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live) and [OpenAI's GPT-6 Luna documentation](https://developers.openai.com/api/docs/models/gpt-6-luna).
 
 The Compose app has no Docker daemon access. For substantive remediation with behavioral checks, run the app natively with a local Docker sandbox.
 
@@ -74,15 +93,15 @@ GitHub input accepts `owner/repository` or `https://github.com/owner/repository`
 
 ## Reports and API
 
-The UI presents findings, attempts, accepted/rejected edits, rationale, progress, validation evidence, stop reasons, limitations, and recent runs. Download Markdown or JSON reports and a unified diff.
+The UI presents findings, attempts, accepted/rejected edits, rationale, progress, validation evidence, stop reasons, limitations, and recent runs. Download a presentable standalone HTML report, Markdown, JSON, or a unified diff. HTML includes readable findings and rationale, validation evidence, provider metadata, accepted changes, and print styling; it opens offline without scripts or external assets. Repository/model text is escaped before inclusion.
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/health` | Database readiness and provider/sandbox configuration |
-| `POST /api/runs` | Multipart `file` ZIP or `repository`; exactly one |
+| `POST /api/runs` | Multipart `file` ZIP or `repository`; exactly one. Optional `model_provider`, `model_name`, `model_api_key`, `model_reasoning_effort` overrides. Select an explicit provider when sending overrides. |
 | `GET /api/runs` | Recent runs |
 | `GET /api/runs/{id}` | Progress and persisted report |
-| `GET /api/runs/{id}/report?format=markdown` | Report (`json` also supported) |
+| `GET /api/runs/{id}/report?format=markdown` | Report (`html` and `json` also supported) |
 | `GET /api/runs/{id}/patch` | Accepted changes |
 
 Set `CODEPROOF_API_TOKEN` to require `Authorization: Bearer ...`. The UI has an optional token field retained only in memory. Use CodeProof locally; deployment beyond loopback requires a separate authentication, authorization, and tenancy design. See [SECURITY.md](SECURITY.md).
@@ -98,5 +117,7 @@ python -m pytest --cov=codeproof --cov-report=term-missing
 ```
 
 Set `CODEPROOF_TEST_DATABASE_URL` to a dedicated **test database** for actual PostgreSQL/pgvector integration coverage. Tests clean their own records and may mark interrupted jobs failed; never use an active app database. Set `CODEPROOF_TEST_SANDBOX=1` after building the sandbox image for Docker execution tests. Unavailable integrations are skipped and disclosed.
+
+Automated tests isolate the operator's `.env` and provider credentials; provider HTTP calls use mocked responses. Live provider validation is a separate, explicitly started check after credentials are configured.
 
 GitHub Actions runs lint/format, tests with PostgreSQL/pgvector, Docker sandbox checks, and an app image build. See [architecture](docs/ARCHITECTURE.md), [implementation report](docs/IMPLEMENTATION_REPORT.md), and [contributing](CONTRIBUTING.md).

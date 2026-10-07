@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,15 +20,20 @@ class Settings(BaseSettings):
     max_run_seconds: int = Field(default=300, ge=10, le=1800)
     command_timeout: int = Field(default=30, ge=1, le=120)
     llm_base_url: str = "https://api.openai.com/v1"
-    llm_api_key: str = ""
-    llm_model: str = ""
+    llm_provider: Literal["auto", "openai", "gemini"] = "auto"
+    llm_api_key: str = Field(default="", repr=False)
+    llm_model: str = "gpt-6-luna"
+    llm_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "medium"
+    gemini_api_key: str = Field(default="", repr=False)
+    gemini_model: str = ""
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     llm_timeout: int = Field(default=30, ge=1, le=120)
     llm_max_calls: int = Field(default=6, ge=0, le=20)
     llm_max_input_chars: int = Field(default=24000, ge=1000, le=100000)
     sandbox_enabled: bool = False
     sandbox_image: str = "codeproof-sandbox:local"
     sandbox_timeout: int = Field(default=60, ge=1, le=180)
-    api_token: str = ""
+    api_token: str = Field(default="", repr=False)
     worker_poll_seconds: float = Field(default=1.0, ge=0.1, le=30)
     max_queued_runs: int = Field(default=20, ge=1, le=100)
 

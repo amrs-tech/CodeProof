@@ -475,11 +475,18 @@ class _Review:
         unresolved = sum(finding["status"] != "resolved" for finding in self.findings)
         status = "improved" if accepted else "stopped" if self.stop_reason else "reviewed"
         if accepted:
-            summary = f"Accepted {accepted} verified targeted change(s); {unresolved} finding(s) remain for review."
+            summary = (
+                f"Accepted {accepted} verified targeted change{'s' if accepted != 1 else ''}; "
+                f"{unresolved} finding{'s remain' if unresolved != 1 else ' remains'} for review."
+            )
         elif self.stop_reason:
             summary = f"Review stopped safely: {self.stop_reason}. No changes were accepted."
         else:
-            summary = f"Reviewed {len(self.current)} Python file(s); {unresolved} finding(s) require review."
+            count = len(self.current)
+            summary = (
+                f"Reviewed {count} Python file{'s' if count != 1 else ''}; "
+                f"{unresolved} finding{'s require' if unresolved != 1 else ' requires'} review."
+            )
         patch = ""
         for relative in self.original:
             if self.original[relative] != self.current.get(relative):
@@ -490,6 +497,7 @@ class _Review:
             else "Completed bounded review"
         )
         report = {
+            "provider": self.provider.public_metadata,
             "summary": summary,
             "status": status,
             "findings": self.findings,

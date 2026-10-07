@@ -72,15 +72,16 @@
   }
 
   class ApiError extends Error {
-    constructor(message, status = 0) {
+    constructor(message, status = 0, fieldId = null) {
       super(message);
       this.name = "ApiError";
       this.status = status;
+      this.fieldId = fieldId;
     }
   }
 
   function errorMessage(error) {
-    if (error.status === 401) return "This server requires an API token. Enter it in Connection settings and try again.";
+    if (error.status === 401) return "This server requires a CodeProof access token. Enter it in Connection settings and try again.";
     if (error.status === 403) return "The server refused this request. Use CodeProof from its local address and check your access settings.";
     if (error instanceof ApiError) return error.message;
     return error.message === "Request timed out" ? "The request timed out. Check the service connection and try again." : "Could not reach the review service. Check that it is running and try again.";
@@ -160,6 +161,58 @@
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
+  function providerLabel(provider) {
+    return { openai: "OpenAI", gemini: "Gemini" }[provider] || humanize(provider);
+  }
+
+  function providerInfo(provider) {
+    return Array.isArray(state.health?.providers) ? state.health.providers.find((item) => item.id === provider) : undefined;
+  }
+
+  function updateModelControls() {
+    const provider = $("model-provider").value;
+    const explicit = provider === "openai" || provider === "gemini";
+    const info = providerInfo(provider);
+    $("model-provider").disabled = state.submitting;
+    $("model-name").disabled = state.submitting || !explicit;
+    $("model-api-key").disabled = state.submitting || !explicit;
+    $("model-reasoning").disabled = state.submitting || provider !== "openai";
+    $("reasoning-field").hidden = provider !== "openai";
+    $("model-fields").classList.toggle("no-reasoning", provider !== "openai");
+    $("model-mode-label").textContent = explicit ? `${providerLabel(provider)} · This review` : "Server default";
+    $("model-name").placeholder = explicit ? info?.model || (provider === "openai" ? "gpt-6-luna" : "Provider model name") : "Choose a provider first";
+    $("model-name-help").textContent = explicit && info?.model ? `Leave blank to use ${info.model}.` : "Leave blank to use the selected provider’s default model.";
+    $("model-api-key").placeholder = explicit ? "API key for this review" : "Choose a provider first";
+    $("model-key-help").textContent = !explicit ? "Choose a provider to use your own key. Leave blank to use its server key when configured." : info?.configured ? `Leave blank to use the server’s configured ${providerLabel(provider)} key.` : info ? `No server key is configured for ${providerLabel(provider)}. Add your key to enable model proposals for this review.` : "Leave blank to use this provider’s server key when configured.";
+    const selected = state.health?.selected_provider;
+    const model = state.health?.selected_model;
+    $("model-config-summary").textContent = selected ? `Server default: ${providerLabel(selected)}${model ? ` · ${model}` : ""}. Choose a provider to override it for this review.` : "Use the server’s defaults, or choose a provider for this review.";
+  }
+
+  function captureModelSettings(form) {
+    const provider = $("model-provider").value;
+    const model = $("model-name").value.trim();
+    const key = $("model-api-key").value.trim();
+    try {
+      if (!provider && (model || key)) throw new ApiError("Choose a provider before entering a model name or provider API key.", 0, "model-provider");
+      if (provider && !["openai", "gemini"].includes(provider)) throw new ApiError("Choose OpenAI, Gemini, or the server default.", 0, "model-provider");
+      if (!provider) return;
+      if (model && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(model)) throw new ApiError("Use a model name of up to 128 letters, numbers, dots, underscores, or hyphens, starting with a letter or number.", 0, "model-name");
+      if (key.length > 4096 || /[^\x20-\x7E]/.test(key)) throw new ApiError("The provider API key must be no more than 4096 printable ASCII characters. Remove line breaks or unsupported characters.", 0, "model-api-key");
+      form.append("model_provider", provider);
+      if (model) form.append("model_name", model);
+      if (key) form.append("model_api_key", key);
+      if (provider === "openai") {
+        const effort = $("model-reasoning").value;
+        if (!["none", "low", "medium", "high", "xhigh", "max"].includes(effort)) throw new ApiError("Choose a supported OpenAI reasoning effort.", 0, "model-reasoning");
+        form.append("model_reasoning_effort", effort);
+      }
+    } finally {
+      // Keep the captured key only in this request body, never in UI state or browser storage.
+      $("model-api-key").value = "";
+    }
+  }
+
   function setSubmitting(submitting) {
     state.submitting = submitting;
     for (const id of ["repository", "source-file", "github-tab", "zip-tab", "start-review"]) $(id).disabled = submitting;
@@ -168,6 +221,7 @@
     $("review-form").setAttribute("aria-busy", String(submitting));
     $("start-review").replaceChildren(document.createTextNode(submitting ? "Preparing source…" : "Start review"));
     if (!submitting) $("start-review").append(element("span", "", "→"));
+    updateModelControls();
   }
 
   async function loadHealth() {
@@ -176,11 +230,13 @@
       state.health = health;
       const ready = health.database === "ready";
       const parts = [ready ? "Review service ready" : "Database unavailable"];
-      parts.push(health.provider_configured ? "AI provider configured" : "Local checks available · AI provider not configured");
+      parts.push(health.provider_configured ? `${providerLabel(health.selected_provider || "AI")} configured${health.selected_model ? ` · ${health.selected_model}` : ""}` : "Local checks available · Server model key not configured");
       parts.push(health.sandbox_enabled ? "Behavioral sandbox enabled" : "Static verification only");
       $("service-status").textContent = parts.join(" / ");
       $("service-status").classList.toggle("unavailable", !ready);
       if (health.max_upload_bytes) $("zip-help").textContent = `ZIP files up to ${formatBytes(health.max_upload_bytes)}. Archive and repository limits are enforced by the server.`;
+      notice("provider-notice", typeof health.provider_notice === "string" ? health.provider_notice : "");
+      updateModelControls();
     } catch {
       $("service-status").textContent = "Review service unavailable. Start the local service or check its connection.";
       $("service-status").classList.add("unavailable");
@@ -493,11 +549,31 @@
     if (Object.keys(metrics).length) $("report-actions").append(detailBlock("Run limits and metrics", metrics));
   }
 
+  function renderProviderMetadata(run) {
+    const metadata = run.source?.provider;
+    $("report-provider").replaceChildren();
+    $("report-provider").hidden = !metadata || typeof metadata !== "object";
+    if (!metadata || typeof metadata !== "object") return;
+    const credentials = { byok: "Own key · This review", environment: "Server environment", none: "No provider key" };
+    const items = [
+      ["Provider", metadata.provider ? providerLabel(metadata.provider) : "Not recorded"],
+      ["Model", metadata.model || "Not recorded"],
+      ["Reasoning effort", metadata.reasoning_effort ? humanize(metadata.reasoning_effort) : "Not applicable"],
+      ["Credential source", credentials[metadata.credential_source] || "Not recorded"],
+    ];
+    for (const [label, value] of items) {
+      const entry = element("dl");
+      entry.append(element("dt", "", label), element("dd", "", value));
+      $("report-provider").append(entry);
+    }
+  }
+
   function renderReport(report, run) {
     $("report-content").hidden = false;
     const titles = { improved: "Verified improvements, ready for review.", reviewed: "Review complete.", stopped: "Review stopped at a guardrail.", failed: "Review ended with an error." };
     $("report-title").textContent = titles[report.status || run.status] || "Review evidence";
     $("report-summary").textContent = stringify(report.summary) || "Inspect the findings and validation evidence for this review.";
+    renderProviderMetadata(run);
     const findings = asArray(report.findings).map((value) => typeof value === "object" && value !== null ? value : { message: value });
     const actions = asArray(report.actions);
     renderMetrics(report, findings);
@@ -522,6 +598,14 @@
     if (state.submitting) return;
     notice("form-error", "");
     const form = new FormData();
+    try {
+      captureModelSettings(form);
+    } catch (error) {
+      notice("form-error", errorMessage(error));
+      $("model-settings").open = true;
+      if (error.fieldId) $(error.fieldId).focus();
+      return;
+    }
     if (state.source === "github") {
       const repository = $("repository").value.trim();
       if (!repository) { notice("form-error", "Enter a public GitHub repository URL or owner/repository name."); $("repository").focus(); return; }
@@ -547,6 +631,7 @@
       const message = errorMessage(error);
       notice("form-error", `${message}${error.message === "Request timed out" ? " A review may already have been created; refresh recent reviews before submitting again." : ""}`);
     } finally {
+      $("model-api-key").value = "";
       setSubmitting(false);
     }
   }
@@ -599,13 +684,22 @@
     setFile(files[0]);
   });
   $("review-form").addEventListener("submit", submitReview);
+  $("model-provider").addEventListener("change", () => {
+    $("model-api-key").value = "";
+    $("model-name").value = "";
+    $("model-reasoning").value = "medium";
+    updateModelControls();
+    notice("form-error", "");
+  });
   $("refresh-runs").addEventListener("click", loadRecent);
   $("refresh-detail").addEventListener("click", () => { if (state.selectedId) selectRun(state.selectedId); });
   $("api-token").addEventListener("change", () => { loadRecent(); if (state.selectedId && !state.submitting) selectRun(state.selectedId); });
   $("download-patch").addEventListener("click", (event) => download("patch", event.currentTarget));
   $("download-markdown").addEventListener("click", (event) => download("markdown", event.currentTarget));
+  $("download-html").addEventListener("click", (event) => download("html", event.currentTarget));
   $("download-json").addEventListener("click", (event) => download("json", event.currentTarget));
-  window.addEventListener("pagehide", () => { stopPolling(); state.recentController?.abort(); });
+  window.addEventListener("pagehide", () => { $("model-api-key").value = ""; stopPolling(); state.recentController?.abort(); });
+  updateModelControls();
   loadHealth();
   loadRecent();
 })();

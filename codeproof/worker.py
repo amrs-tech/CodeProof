@@ -6,6 +6,7 @@ from threading import Event
 
 from codeproof.config import Settings
 from codeproof.errors import RunAborted
+from codeproof.providers import ProviderConfigurationError, RunSettingsVault, recover_run_settings
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,7 @@ class WorkerOwnershipLost(RunAborted):
     pass
 
 
-def work(store, settings: Settings, stop: Event) -> None:
+def work(store, settings: Settings, stop: Event, vault: RunSettingsVault | None = None) -> None:
     from codeproof.engine import run_review
 
     while not stop.is_set():
@@ -36,7 +37,13 @@ def work(store, settings: Settings, stop: Event) -> None:
                 raise WorkerOwnershipLost
             store.update_progress(rid, stage, detail)
 
+        run_config = None
         try:
+            run_config = vault.pop(run_id) if vault is not None else None
+            if run_config is None:
+                run_config = recover_run_settings(
+                    settings, run.get("source", {}).get("provider", {})
+                )
             workspace = Path(run["workspace"]).resolve()
             root = settings.data_dir.resolve()
             if not workspace.is_relative_to(root) or workspace == root:
@@ -45,12 +52,13 @@ def work(store, settings: Settings, stop: Event) -> None:
             store.index_workspace(run_id, workspace)
             report = run_review(
                 workspace,
-                settings,
+                run_config,
                 context_search=lambda query, rid=run_id: store.search_context(rid, query),
                 progress=progress,
             )
             if not store.worker_lock_healthy():
                 raise WorkerOwnershipLost
+            report["provider"] = run.get("source", {}).get("provider", report.get("provider", {}))
             store.finish_run(run_id, report)
         except WorkerOwnershipLost:
             logger.error("Worker ownership lost; interrupted review left for restart recovery.")
@@ -62,8 +70,14 @@ def work(store, settings: Settings, stop: Event) -> None:
                 if not store.worker_lock_healthy():
                     return
                 store.fail_run(
-                    run_id, "Review could not finish safely. Check local service configuration."
+                    run_id,
+                    str(exc)
+                    if isinstance(exc, ProviderConfigurationError)
+                    else "Review could not finish safely. Check local service configuration.",
                 )
             except Exception:
                 logger.error("Could not persist failed run status; worker is stopping.")
                 return
+        finally:
+            # Release a run-only credential even when validation or persistence fails.
+            run_config = None

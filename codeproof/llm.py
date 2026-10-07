@@ -1,4 +1,4 @@
-"""Bounded OpenAI-compatible structured edit proposals, without model tools."""
+"""Bounded OpenAI-compatible and native Gemini edit proposals, without model tools."""
 
 from __future__ import annotations
 
@@ -67,6 +67,7 @@ def contains_credentials(text: str) -> bool:
         r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
         r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
         r"\b(?:sk-(?:proj-)?[A-Za-z0-9_-]{16,}|gh[opusr]_[A-Za-z0-9]{20,})\b",
+        r"\bAIza[A-Za-z0-9_-]{30,50}\b",
         r"(?:postgres(?:ql)?|mysql|https?)://[^\s/:]+:[^\s/@]+@",
         r"(?i)(?:api[_-]?key|secret|password|access[_-]?token)[\"']?\s*[=:]\s*[\"'][^\"']{6,}[\"']",
     )
@@ -116,26 +117,81 @@ def parse_proposal(value: object, expected_path: str, source: bytes, maximum: in
     return Proposal(edit["path"], edit["sha256"], edit["content"], value["rationale"])
 
 
+def _contains_known_key(value: object, keys: tuple[str, ...]) -> bool:
+    if isinstance(value, str):
+        return any(key in value for key in keys)
+    if isinstance(value, dict):
+        return any(_contains_known_key(item, keys) for pair in value.items() for item in pair)
+    if isinstance(value, list):
+        return any(_contains_known_key(item, keys) for item in value)
+    return False
+
+
 class EditProvider:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.calls = 0
 
     @property
-    def configured(self) -> bool:
-        return bool(
-            self.settings.llm_api_key
-            and self.settings.llm_model
-            and self.settings.llm_max_calls > 0
+    def provider(self) -> str:
+        selected = getattr(self.settings, "llm_provider", "auto")
+        if selected == "auto":
+            return (
+                "gemini"
+                if (
+                    getattr(self.settings, "gemini_api_key", "")
+                    and getattr(self.settings, "gemini_model", "")
+                )
+                else "openai"
+            )
+        if selected not in {"openai", "gemini"}:
+            raise ProposalError("Provider selection is unsupported")
+        return selected
+
+    @property
+    def model(self) -> str:
+        return (
+            getattr(self.settings, "gemini_model", "")
+            if self.provider == "gemini"
+            else self.settings.llm_model
         )
 
-    def propose(
-        self, finding: dict, source: bytes, context: list[dict], feedback: str, deadline: float
-    ) -> Proposal:
+    @property
+    def public_metadata(self) -> dict:
+        """Safe audit metadata; API keys and service URLs are never part of the report."""
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "reasoning_effort": self._reasoning_effort() if self.provider == "openai" else None,
+        }
+
+    def _reasoning_effort(self) -> str | None:
+        reasoning_model = re.match(r"^(?:gpt-[56](?:[.-]|$)|o[134](?:[-.]|$))", self.model)
+        effort = getattr(self.settings, "llm_reasoning_effort", "medium")
+        if not reasoning_model or not effort or effort == "auto":
+            return None
+        if effort not in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}:
+            raise ProposalError("OpenAI reasoning effort is unsupported")
+        return effort
+
+    @property
+    def configured(self) -> bool:
+        key = (
+            getattr(self.settings, "gemini_api_key", "")
+            if self.provider == "gemini"
+            else self.settings.llm_api_key
+        )
+        return bool(key and self.model and self.settings.llm_max_calls > 0)
+
+    def _request(self, encoded: str, source_text: str) -> tuple[str, dict, dict]:
         settings = self.settings
-        if not self.configured:
-            raise ProposalError("No language-model provider is configured")
-        url = urlsplit(settings.llm_base_url)
+        provider = self.provider
+        base = (
+            getattr(settings, "gemini_base_url", "https://generativelanguage.googleapis.com/v1beta")
+            if provider == "gemini"
+            else settings.llm_base_url
+        )
+        url = urlsplit(base)
         local = url.hostname in {"localhost", "127.0.0.1", "::1"}
         if (
             url.scheme not in {"https", "http"}
@@ -147,18 +203,134 @@ class EditProvider:
             or url.fragment
         ):
             raise ProposalError("Provider URL must be HTTPS, or loopback HTTP, without credentials")
+        output_tokens = min(16000, max(1024, len(source_text) * 2))
+        if provider == "gemini":
+            model = self.model.removeprefix("models/")
+            if not re.fullmatch(r"gemini-[A-Za-z0-9][A-Za-z0-9._-]{0,120}", model):
+                raise ProposalError("Gemini model must be a valid text-generation model name")
+            if any(
+                word in model.lower().split("-")
+                for word in ("live", "audio", "tts", "image", "embedding")
+            ):
+                raise ProposalError(
+                    "Gemini Live, audio, image and embedding models do not support code proposals"
+                )
+            body = {
+                "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+                "contents": [{"role": "user", "parts": [{"text": encoded}]}],
+                "generationConfig": {
+                    "candidateCount": 1,
+                    "maxOutputTokens": output_tokens,
+                    "responseFormat": {"text": {"mimeType": "APPLICATION_JSON", "schema": SCHEMA}},
+                },
+            }
+            return (
+                base.rstrip("/") + f"/models/{model}:generateContent",
+                {"x-goog-api-key": getattr(settings, "gemini_api_key", "")},
+                body,
+            )
+        body = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": encoded},
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "repository_edit", "strict": True, "schema": SCHEMA},
+            },
+            "max_completion_tokens": output_tokens,
+        }
+        effort = self._reasoning_effort()
+        if effort is not None:
+            body["reasoning_effort"] = effort
+        return (
+            base.rstrip("/") + "/chat/completions",
+            {"Authorization": f"Bearer {settings.llm_api_key}"},
+            body,
+        )
+
+    def _response_text(self, result: object) -> str:
+        if not isinstance(result, dict):
+            raise ProposalError("Provider returned an invalid response object")
+        if self.provider == "gemini":
+            feedback = result.get("promptFeedback", {})
+            if not isinstance(feedback, dict) or feedback.get("blockReason") not in (
+                None,
+                "BLOCK_REASON_UNSPECIFIED",
+            ):
+                raise ProposalError("Gemini provider blocked the proposal")
+            candidates = result.get("candidates")
+            if (
+                not isinstance(candidates, list)
+                or len(candidates) != 1
+                or not isinstance(candidates[0], dict)
+            ):
+                raise ProposalError("Gemini provider must return exactly one proposal candidate")
+            candidate = candidates[0]
+            if candidate.get("finishReason") != "STOP":
+                raise ProposalError("Gemini provider proposal was blocked or incomplete")
+            ratings = candidate.get("safetyRatings", [])
+            if not isinstance(ratings, list) or any(
+                not isinstance(rating, dict) or rating.get("blocked", False) for rating in ratings
+            ):
+                raise ProposalError("Gemini provider blocked the proposal")
+            content = candidate.get("content", {})
+            if not isinstance(content, dict) or content.get("role") not in {None, "model"}:
+                raise ProposalError("Gemini provider returned an invalid proposal content role")
+            parts = content.get("parts")
+            if not isinstance(parts, list) or len(parts) != 1 or not isinstance(parts[0], dict):
+                raise ProposalError("Gemini provider returned ambiguous proposal content")
+            part = parts[0]
+            if set(part) - {"text", "thought", "thoughtSignature"} or part.get("thought", False):
+                raise ProposalError("Gemini provider returned unsupported non-text content")
+            text = part.get("text")
+        else:
+            choices = result.get("choices")
+            if (
+                not isinstance(choices, list)
+                or len(choices) != 1
+                or not isinstance(choices[0], dict)
+            ):
+                raise ProposalError("Provider must return exactly one proposal choice")
+            choice = choices[0]
+            if choice.get("finish_reason") not in {None, "stop"}:
+                raise ProposalError("Provider proposal was blocked or incomplete")
+            message = choice.get("message", {})
+            if not isinstance(message, dict) or message.get("refusal") or message.get("tool_calls"):
+                raise ProposalError(
+                    "Provider refused the proposal or returned unsupported tool calls"
+                )
+            text = message.get("content")
+        if not isinstance(text, str) or not text.strip():
+            raise ProposalError("Provider returned empty or non-text structured content")
+        return text
+
+    def propose(
+        self, finding: dict, source: bytes, context: list[dict], feedback: str, deadline: float
+    ) -> Proposal:
+        settings = self.settings
+        if not self.configured:
+            raise ProposalError("No language-model provider is configured")
         try:
             text = source.decode("utf-8")
         except UnicodeDecodeError as error:
             raise ProposalError("Model edits require UTF-8 source") from error
-        if contains_credentials(text):
+        known_keys = tuple(
+            key for key in (settings.llm_api_key, getattr(settings, "gemini_api_key", "")) if key
+        )
+        if contains_credentials(text) or any(key in text for key in known_keys):
             raise ProposalError(
                 "Source may contain credential literals; provider transmission blocked"
             )
         safe_context = []
         for item in context[:3]:
             context_text = json.dumps(item, ensure_ascii=False)
-            if len(context_text) <= 4000 and not contains_credentials(context_text):
+            if (
+                len(context_text) <= 4000
+                and not contains_credentials(context_text)
+                and not any(key in context_text for key in known_keys)
+            ):
                 safe_context.append(item)
         payload = {
             "finding": {key: finding[key] for key in ("rule", "path", "line", "message")},
@@ -174,18 +346,7 @@ class EditProvider:
             encoded = json.dumps(payload, ensure_ascii=False)
         if len(encoded) + len(SYSTEM_PROMPT) > settings.llm_max_input_chars:
             raise ProposalError("Source exceeds model prompt budget")
-        body = {
-            "model": settings.llm_model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": encoded},
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": "repository_edit", "strict": True, "schema": SCHEMA},
-            },
-            "max_completion_tokens": min(16000, max(1024, len(text) * 2)),
-        }
+        endpoint, headers, body = self._request(encoded, text)
         for retry in range(2):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -201,13 +362,17 @@ class EditProvider:
                 ) as client:
                     with client.stream(
                         "POST",
-                        settings.llm_base_url.rstrip("/") + "/chat/completions",
-                        headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+                        endpoint,
+                        headers=headers,
                         json=body,
                     ) as response:
                         if response.status_code == 429 or response.status_code >= 500:
                             if retry == 0:
                                 continue
+                            if response.status_code == 429:
+                                raise ProposalError(
+                                    "Provider rate limit or quota exceeded after two bounded attempts"
+                                )
                             raise ProposalError("Provider unavailable after two bounded attempts")
                         if response.status_code != 200:
                             raise ProposalError(
@@ -223,10 +388,15 @@ class EditProvider:
                                     "Run time limit reached during provider response"
                                 )
                 result = json.loads(chunks)
-                content = result["choices"][0]["message"]["content"]
-                return parse_proposal(
-                    json.loads(content), finding["path"], source, settings.max_file_bytes
-                )
+                content = self._response_text(result)
+                if any(key in content for key in known_keys):
+                    raise ProposalError("Provider response contains credentials; proposal rejected")
+                value = json.loads(content)
+                # JSON escapes cannot hide a key in either replacement source or rationale.
+                decoded = json.dumps(value, ensure_ascii=False)
+                if _contains_known_key(value, known_keys) or contains_credentials(decoded):
+                    raise ProposalError("Provider response contains credentials; proposal rejected")
+                return parse_proposal(value, finding["path"], source, settings.max_file_bytes)
             except (httpx.TimeoutException, httpx.NetworkError) as error:
                 if retry == 0:
                     continue

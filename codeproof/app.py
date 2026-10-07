@@ -18,7 +18,13 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from codeproof.config import Settings, settings
-from codeproof.reporting import markdown_report
+from codeproof.providers import (
+    ProviderConfigurationError,
+    RunSettingsVault,
+    provider_health,
+    resolve_provider,
+)
+from codeproof.reporting import html_report, markdown_report
 from codeproof.worker import work
 
 logger = logging.getLogger(__name__)
@@ -72,7 +78,11 @@ def create_app(config: Settings = settings, store=None, start_worker: bool = Tru
                 if not app.state.store.acquire_worker_lock():
                     raise RuntimeError("Another CodeProof worker is already using this database")
                 app.state.store.recover_interrupted()
-                thread = Thread(target=work, args=(app.state.store, config, stop), daemon=True)
+                thread = Thread(
+                    target=work,
+                    args=(app.state.store, config, stop, app.state.run_settings),
+                    daemon=True,
+                )
                 thread.start()
             app.state.worker_thread = thread
             config.data_dir.mkdir(parents=True, exist_ok=True)
@@ -83,6 +93,7 @@ def create_app(config: Settings = settings, store=None, start_worker: bool = Tru
                 # Shutdown waits for the bounded active review before closing its database pool.
                 await asyncio.to_thread(thread.join, config.max_run_seconds + 30)
             app.state.store.close()
+            app.state.run_settings.clear()
 
     app = FastAPI(title="CodeProof", version="0.1.0", lifespan=lifespan)
     app.add_middleware(BodyLimitMiddleware, limit=config.max_upload_bytes + 1024 * 1024)
@@ -90,6 +101,7 @@ def create_app(config: Settings = settings, store=None, start_worker: bool = Tru
         TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"]
     )
     app.state.ingestion_slots = asyncio.Semaphore(2)
+    app.state.run_settings = RunSettingsVault()
 
     @app.middleware("http")
     async def access_guard(request: Request, call_next):
@@ -122,9 +134,12 @@ def create_app(config: Settings = settings, store=None, start_worker: bool = Tru
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self'; style-src 'self'; "
-            "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            (
+                "default-src 'self'; script-src 'self'; style-src 'self'; "
+                "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+            ),
         )
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -140,7 +155,7 @@ def create_app(config: Settings = settings, store=None, start_worker: bool = Tru
         return {
             "database": "ready",
             "worker": "ready" if start_worker else "disabled",
-            "provider_configured": bool(config.llm_model and config.llm_api_key),
+            **provider_health(config),
             "sandbox_enabled": config.sandbox_enabled,
             "max_upload_bytes": config.max_upload_bytes,
         }
@@ -150,6 +165,10 @@ def create_app(config: Settings = settings, store=None, start_worker: bool = Tru
         request: Request,
         repository: Annotated[str | None, Form()] = None,
         file: Annotated[UploadFile | None, File()] = None,
+        model_provider: Annotated[str, Form()] = "",
+        model_name: Annotated[str, Form()] = "",
+        model_api_key: Annotated[str, Form()] = "",
+        model_reasoning_effort: Annotated[str, Form()] = "",
     ):
         from codeproof.ingestion import IngestionError, ingest_github, ingest_zip
 
@@ -164,6 +183,12 @@ def create_app(config: Settings = settings, store=None, start_worker: bool = Tru
             raise HTTPException(422, "Repository reference is too long")
         if file and not (file.filename or "").lower().endswith(".zip"):
             raise HTTPException(422, "Upload a source code .zip file")
+        try:
+            run_config, provider = resolve_provider(
+                config, model_provider, model_name, model_api_key, model_reasoning_effort
+            )
+        except ProviderConfigurationError as exc:
+            raise HTTPException(422, str(exc)) from None
         if app.state.ingestion_slots.locked():
             raise HTTPException(429, "Intake is busy; retry after the current uploads finish")
         async with app.state.ingestion_slots:
@@ -186,17 +211,22 @@ def create_app(config: Settings = settings, store=None, start_worker: bool = Tru
                     archive.unlink(missing_ok=True)
                 else:
                     source = await asyncio.to_thread(ingest_github, repository, workspace, config)
+                source["provider"] = provider
+                request.app.state.run_settings.put(run_id, run_config)
                 run = await asyncio.to_thread(
                     request.app.state.store.create_run, run_id, source, workspace
                 )
                 return public_run(run)
             except (IngestionError, ValueError) as exc:
+                request.app.state.run_settings.pop(run_id)
                 shutil.rmtree(run_root)
                 raise HTTPException(422, str(exc)) from None
             except HTTPException:
+                request.app.state.run_settings.pop(run_id)
                 shutil.rmtree(run_root)
                 raise
             except Exception as exc:
+                request.app.state.run_settings.pop(run_id)
                 shutil.rmtree(run_root)
                 logger.error("Submission failed (%s)", type(exc).__name__)
                 raise HTTPException(503, "Submission failed; check service configuration") from None
@@ -236,20 +266,25 @@ def create_app(config: Settings = settings, store=None, start_worker: bool = Tru
         run = lookup(request, run_id)
         if not run.get("report"):
             raise HTTPException(409, "The review report is not ready")
-        if format not in {"markdown", "json"}:
-            raise HTTPException(422, "Report format must be markdown or json")
-        content = (
-            markdown_report(run)
-            if format == "markdown"
-            else json.dumps(public_run(run), indent=2, default=str)
-        )
-        extension = "md" if format == "markdown" else "json"
+        if format not in {"markdown", "html", "json"}:
+            raise HTTPException(422, "Report format must be markdown, html or json")
+        if format == "html":
+            content, extension, media_type = html_report(run), "html", "text/html"
+        elif format == "markdown":
+            content, extension, media_type = markdown_report(run), "md", "text/markdown"
+        else:
+            content = json.dumps(public_run(run), indent=2, default=str)
+            extension, media_type = "json", "application/json"
+        headers = {"Content-Disposition": f'attachment; filename="codeproof-{run_id}.{extension}"'}
+        if format == "html":
+            headers["Content-Security-Policy"] = (
+                "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; "
+                "form-action 'none'; frame-ancestors 'none'"
+            )
         return Response(
             content,
-            media_type="text/markdown" if extension == "md" else "application/json",
-            headers={
-                "Content-Disposition": f'attachment; filename="codeproof-{run_id}.{extension}"'
-            },
+            media_type=media_type,
+            headers=headers,
         )
 
     @app.get("/api/runs/{run_id}/patch")

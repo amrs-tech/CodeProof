@@ -15,6 +15,98 @@
   --heading:'Manrope',var(--font);
 }
 
+.model-settings {
+  margin-top:23px;
+  padding-top:17px;
+  border-top:1px solid #edf0e9;
+}
+
+.model-settings>summary {
+  cursor:pointer;
+  font-size:12px;
+  font-weight:550;
+  color:#526a47;
+  min-height:27px;
+}
+
+.model-settings>summary::marker {
+  color:#8aa477;
+}
+
+.model-mode-label {
+  float:right;
+  font-size:10px;
+  font-weight:400;
+  color:#8a977e;
+  margin-left:10px;
+}
+
+.model-fields {
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:17px 20px;
+  margin-top:17px;
+}
+
+.model-fields.no-reasoning .model-key-field {
+  grid-column:1/-1;
+}
+
+.model-fields input,.model-fields select {
+  width:100%;
+  min-height:41px;
+  border:1px solid #d8e0d6;
+  background:#fcfdfb;
+  color:var(--ink);
+  border-radius:8px;
+  padding:10px 12px;
+  font-size:12px;
+}
+
+.model-fields input::placeholder {
+  color:#95a08f;
+}
+
+.model-fields input:disabled,.model-fields select:disabled {
+  background:#f5f7f1;
+  opacity:.6;
+}
+
+.key-lifetime {
+  margin:16px 0 0;
+  color:#7d8c72;
+  font-size:10px;
+  line-height:1.8;
+}
+
+.provider-metadata {
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:15px;
+  background:#f1f6eb;
+  border:1px solid #e0e8d8;
+  border-radius:8px;
+  padding:14px 18px;
+  margin-bottom:18px;
+}
+
+.provider-metadata dl {
+  margin:0;
+}
+
+.provider-metadata dt {
+  color:#829374;
+  font-size:9px;
+}
+
+.provider-metadata dd {
+  margin:3px 0 0;
+  font-size:11px;
+  font-weight:500;
+  color:#4f6b40;
+  overflow-wrap:anywhere;
+}
+
 .service-status {
   font-size:10px;
   color:#728367;
@@ -93,11 +185,11 @@ body {
   line-height:1.5;
 }
 
-button,input {
+button,input,select {
   font:inherit;
 }
 
-button,a,input,summary {
+button,a,input,select,summary {
   touch-action:manipulation;
 }
 
@@ -110,7 +202,7 @@ button:disabled {
   opacity:.48;
 }
 
-button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible {
+button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,select:focus-visible {
   outline:3px solid #9acf9f;
   outline-offset:3px;
 }
@@ -1442,6 +1534,21 @@ label {
 }
 
 @media(max-width:650px) {
+  .model-fields {
+    grid-template-columns:1fr;
+    gap:15px;
+  }
+  .model-fields input,.model-fields select {
+    font-size:11px;
+  }
+  .model-mode-label {
+    font-size:9px;
+  }
+  .provider-metadata {
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:13px;
+    padding:13px 15px;
+  }
   .app-shell {
     display:block;
   }

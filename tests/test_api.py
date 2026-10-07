@@ -148,6 +148,14 @@ def test_report_and_patch_downloads(client):
     assert http.get(f"/api/runs/{run_id}/patch").text == "--- a/a.py\n"
     assert "Fixed redundant interpolation" in http.get(f"/api/runs/{run_id}/report").text
     assert http.get(f"/api/runs/{run_id}/report?format=json").json()["status"] == "improved"
+    html = http.get(f"/api/runs/{run_id}/report?format=html")
+    assert html.status_code == 200
+    assert html.headers["content-type"].startswith("text/html")
+    assert html.headers["content-disposition"].endswith(f'{run_id}.html"')
+    assert "style-src 'unsafe-inline'" in html.headers["content-security-policy"]
+    assert "default-src 'none'" in html.headers["content-security-policy"]
+    assert "Fixed redundant interpolation" in html.text
+    assert "<!doctype html>" in html.text.lower()
     assert http.get(f"/api/runs/{run_id}/report?format=exe").status_code == 422
     assert http.get("/api/runs/not-a-run").status_code == 404
 
